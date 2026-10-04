@@ -3,15 +3,21 @@ use crate::consensus::{
     devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
     DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
 };
-#[cfg(test)]
-use crate::native_activation_v2::NativeExecutionVersion;
+use crate::native_activation_v2::{NativeExecutionActivationV3, NativeExecutionVersion};
 use crate::native_block_body::NativeBlockBodyV1;
 use crate::native_block_body_v2::NativeBlockBodyV2;
+use crate::native_block_execution_v2::execute_inactive_versioned_block_v2;
+use crate::native_block_execution_v3::execute_inactive_versioned_block_v3;
+use crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1;
 use crate::native_execution::{
     execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
 };
-use crate::native_execution_commitment_v2::NativeBlockExecutionResultV2;
-use crate::native_execution_commitment_v3::NativeBlockExecutionResultV3;
+use crate::native_execution_commitment_v2::{
+    build_inactive_execution_result_v2, NativeBlockExecutionResultV2,
+};
+use crate::native_execution_commitment_v3::{
+    build_inactive_execution_result_v3, NativeBlockExecutionResultV3,
+};
 use crate::native_rpc::{mempool_size, submit_raw_transaction_hex, SharedNativeMempoolV1};
 use crate::native_state_v2::NativeStateV2;
 use crate::native_state_v3::NativeStateV3;
@@ -594,6 +600,76 @@ fn submit_work_internal(
         "current_best": hex::encode(outcome.current_best),
         "reorg": reorg
     }))
+}
+
+fn build_inactive_versioned_empty_work_payload(
+    state: &StateStore,
+    parent_id: Hash32,
+    parent_height: u64,
+    height: u64,
+    fee_recipient: Address20,
+    activation: NativeExecutionActivationV3,
+    registry: &NativeContractRuntimeRegistryV1,
+) -> Result<NativeWorkPayload, String> {
+    match activation.execution_version_at_height(height)? {
+        NativeExecutionVersion::V1 => Err("versioned work helper requires V2 or V3 height".into()),
+        NativeExecutionVersion::V2 => {
+            let mut native_state = if height == activation.v2_activation_height {
+                let parent_state = state
+                    .native_state_snapshot(parent_id)?
+                    .ok_or_else(|| "V2 activation parent is missing V1 state snapshot".to_string())?;
+                crate::native_activation_v2::NativeExecutionActivationV2 {
+                    activation_height: activation.v2_activation_height,
+                }
+                .migrate_parent_state(parent_height, parent_state)?
+            } else {
+                state
+                    .inactive_native_state_v2_snapshot(parent_id)?
+                    .ok_or_else(|| "V2 parent is missing V2 state snapshot".to_string())?
+            };
+            let body = NativeBlockBodyV2::empty();
+            let transition = execute_inactive_versioned_block_v2(
+                &mut native_state,
+                &body,
+                AddressNetwork::Devnet,
+                height,
+                0,
+            )?;
+            let execution = build_inactive_execution_result_v2(&body, &transition)?;
+            Ok(NativeWorkPayload::V2 {
+                execution,
+                native_state,
+                body,
+            })
+        }
+        NativeExecutionVersion::V3 => {
+            let mut native_state = if activation.is_v3_activation_height(height)? {
+                let parent_state = state
+                    .inactive_native_state_v2_snapshot(parent_id)?
+                    .ok_or_else(|| "V3 activation parent is missing V2 state snapshot".to_string())?;
+                activation.migrate_v2_parent_state(parent_height, parent_state)?
+            } else {
+                state
+                    .inactive_native_state_v3_snapshot(parent_id)?
+                    .ok_or_else(|| "V3 parent is missing V3 state snapshot".to_string())?
+            };
+            let body = NativeBlockBodyV2::empty();
+            let transition = execute_inactive_versioned_block_v3(
+                &mut native_state,
+                registry,
+                &body,
+                AddressNetwork::Devnet,
+                height,
+                0,
+            )?;
+            let execution = build_inactive_execution_result_v3(&body, &transition)?;
+            Ok(NativeWorkPayload::V3 {
+                execution,
+                native_state,
+                body,
+            })
+        }
+    }
 }
 
 pub(crate) fn install_next_native_work(
