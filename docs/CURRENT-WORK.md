@@ -136,7 +136,7 @@ Still open: succession mechanics, privacy classes, scheduling, reputation, recei
 
 ## Native execution implementation status
 
-The canonical implementation repository is `niahcia/niahcia`. Protocol material was consolidated there while `niahcia/niahcia-protocol` remains a synchronized protocol mirror during the transition.
+The canonical implementation and protocol repository is `niahcia/niahcia`. `niahcia-protocol` is no longer part of the maintenance workflow; implementation, specifications, vectors, architecture, and current-work status are maintained here.
 
 Implemented on `main`:
 
@@ -173,6 +173,24 @@ P2P Version 2 remains protocol history/specification only; the active reference-
 
 Do not improvise ContractCall/ContractCreate runtime semantics. Smart-contract execution is required, but it must be implemented from an explicit versioned native contract-runtime specification with deterministic state/storage, gas, failure/revert, receipt, persistence, and vector rules. Do not invent a base-fee adjustment algorithm; Native Execution V1 currently consumes an explicit base fee and the evolution rule remains separate protocol work.
 
+
+## Native V2/V3 activation and mining status — 2026-10-04
+
+The inactive successor execution path has advanced substantially while remaining disabled by default:
+
+- Native Execution Commitment V3 vectors are locked for receipt commitments, receipts root, execution root, and canonical execution bytes.
+- NativeStateV3, NativeBlockBodyV2, and NativeBlockExecutionResultV3 persist atomically in dedicated inactive tables.
+- Divergent contract-bearing V3 branches have restart/reorg coverage; competing contract state survives restart and the cumulative-work winner restores the correct state.
+- `NativeExecutionActivationV3` explicitly selects V1/V2/V3 by height and performs exact V2 -> V3 parent-state migration at the configured boundary.
+- P2P V3 block payloads carry an explicit V1/V2 native-body version. Active V1 relay remains unchanged; premature V2 ingestion is rejected rather than silently executed.
+- Mining work carries one typed V1/V2/V3 payload so body, execution result, and state version cannot be mixed during submission.
+- `pow_submitWork` atomically dispatches V1, V2, or V3 payloads to their corresponding persistence path.
+- An activation-aware mining builder and installer can construct V2 work from a V1 parent and V3 work from a V2 parent; tests prove V1 -> V2 -> V3 persistence, restart recovery, header commitments, and WorkManager version transitions.
+- `NodeConfig` accepts optional `native_v2_activation_height` and `native_v3_activation_height`. They are disabled by default, must be configured together, and must satisfy `0 < V2 < V3`. Startup consumes and reports the validated schedule.
+- **No production/devnet activation heights are assigned by default.** Existing configurations remain V1-only.
+
+Current runtime blocker: the active mempool and transaction relay are still V1-only. Before full V2/V3 production activation, template refresh, P2P validation/export, and mempool admission must use one shared locally derived activation schedule. Until the mempool becomes versioned, V2/V3 activation-aware mining must use versioned empty bodies rather than pretending V1 mempool support includes contract/compute transactions.
+
 ## Smart-contract execution requirement
 
 Smart contracts have been a core NIAHCIA concept from the beginning. They are part of the base-chain execution model, alongside native value transfer and compute settlement; they are not an optional AI/service-layer feature.
@@ -196,10 +214,10 @@ Implemented on the inactive development path:
 
 Still required before activation:
 
-- atomic NativeStateV3/body/execution persistence and restart recovery;
-- reorg restoration tests for contract-bearing V3 branches;
-- locked V3 create/call/failure and execution-commitment interoperability vectors;
-- explicit consensus activation/version boundary and devnet cross-node validation.
+- versioned active mempool/transaction relay for V2 compute and V3 contract transactions;
+- activation-aware P2P ingestion/export derived from local consensus heights;
+- cross-node devnet validation of V2/V3 execution, commitments, persistence, and reorg convergence;
+- explicit network activation heights only after those runtime paths are proven.
 
 NVM1's candidate execution surface now has deterministic stack/control, bounded byte memory, caller representation, persistent storage isolation, KECCAK256, RETURN/REVERT, and a vectored gas schedule. CALL_VALUE preserves the full native u128 value domain as a 32-byte stack value rather than truncating it to u64.
 
@@ -262,7 +280,7 @@ The runtime boundary remains unchanged:
 - NativeStateV2 is inactive;
 - NativeTransaction V2 is inactive;
 - no compute action is accepted by the active mempool/P2P/mining path;
-- no V2 activation height/network parameter is set;
+- no V2/V3 activation height is enabled by default; optional paired NodeConfig heights now exist for explicit testing;
 - no compute intrinsic gas constants are assigned;
 - no fee-bearing compute transition is active;
 - NativeStateV1 / NativeTransactionV1 behavior and locked vectors remain unchanged.
@@ -273,7 +291,7 @@ Next implementation priority is the explicit **inactive V2 persistence boundary*
 2. Do not persist NativeStateV2 through NativeBlockExecutionResultV1. Its execution commitment remains intentionally bound to NativeStateV1.
 3. NativeReceiptV2 / NativeBlockExecutionResultV2 interoperability vectors are now locked in `test-vectors/native-execution-v2.json` and enforced by Rust tests.
 4. The inactive V2 header/body/execution/state bundle now has a single atomic insertion API. It validates header/body/execution/state commitments before one redb commit and preserves the current V1 atomic path unchanged.
-5. The candidate V2 activation/migration boundary is explicitly defined in `spec/native-execution-v2-activation.md`: V1 below a configured height H, deterministic V1 -> V2 parent-state migration at H, and V2 at/after H. `test-vectors/native-execution-v2-activation.json` now locks H-1/H/H+1 classification, rejection cases, exact migration snapshot/root, restart classification, and reorg-across-H version rules. No network activation height is assigned and the helper is not wired into NodeConfig, mempool, P2P, mining, or active execution.
+5. The candidate V2 activation/migration boundary is explicitly defined in `spec/native-execution-v2-activation.md`: V1 below a configured height H, deterministic V1 -> V2 parent-state migration at H, and V2 at/after H. `test-vectors/native-execution-v2-activation.json` now locks H-1/H/H+1 classification, rejection cases, exact migration snapshot/root, restart classification, and reorg-across-H version rules. No network activation height is assigned. The activation selector is wired into explicit NodeConfig and the staged mining builder/installer, while active mempool/P2P refresh and transaction admission remain V1-only.
 6. Candidate compute intrinsic gas and native fee accounting are now implemented and vectored in `spec/native-compute-gas-v1.md` / `test-vectors/native-compute-gas-v1.json`: Open=3,000, Settle=5,000, Refund=2,000 gas. The inactive block executor now charges base-fee burn + CPU-producer priority fee atomically with each ComputeChannel transition instead of using zero placeholders.
 7. Keep the successor body/execution path inactive and disconnected from mempool/P2P/mining until activation rules and vectors exist.
 8. Keep Jobs, prompts, WorkerAdvertisements, pricing, PaymentAuthorization, ResultCommitmentV2, and ordinary ComputeUsageReceipt exchange off-chain.
