@@ -1,0 +1,1272 @@
+use crate::address::AddressNetwork;
+use crate::consensus::{
+    devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
+    DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
+};
+use crate::native_block_body::NativeBlockBodyV1;
+use crate::native_execution::{
+    execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
+};
+use crate::native_rpc::{mempool_size, submit_raw_transaction_hex, SharedNativeMempoolV1};
+use crate::pow::RandomXVerifier;
+use crate::state::StateStore;
+use crate::work::{Address20, BlockHeaderV1, Hash32};
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{error, info, warn};
+
+pub const MAX_TEMPLATE_TRANSACTIONS_V1: usize = 1024;
+pub const MAX_TEMPLATE_TRANSACTION_BYTES_V1: usize = 4 * 1024 * 1024;
+
+#[derive(Clone)]
+pub struct WorkManager {
+    inner: Arc<RwLock<WorkState>>,
+}
+
+#[derive(Clone)]
+struct WorkState {
+    generation: u64,
+    header: BlockHeaderV1,
+    randomx_seed_height: u64,
+    randomx_seed: [u8; 32],
+    execution: NativeBlockExecutionResultV1,
+    native_state: NativeStateV1,
+    body: NativeBlockBodyV1,
+    solved: bool,
+}
+
+impl WorkManager {
+    pub fn new(
+        header: BlockHeaderV1,
+        randomx_seed_height: u64,
+        randomx_seed: [u8; 32],
+        execution: NativeBlockExecutionResultV1,
+        native_state: NativeStateV1,
+    ) -> Self {
+        Self::new_with_body(
+            header,
+            randomx_seed_height,
+            randomx_seed,
+            execution,
+            native_state,
+            NativeBlockBodyV1::empty(),
+        )
+    }
+
+    pub fn new_with_body(
+        header: BlockHeaderV1,
+        randomx_seed_height: u64,
+        randomx_seed: [u8; 32],
+        execution: NativeBlockExecutionResultV1,
+        native_state: NativeStateV1,
+        body: NativeBlockBodyV1,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(WorkState {
+                generation: 0,
+                header,
+                randomx_seed_height,
+                randomx_seed,
+                execution,
+                native_state,
+                body,
+                solved: false,
+            })),
+        }
+    }
+
+    pub fn current(&self) -> (u64, BlockHeaderV1, u64, [u8; 32]) {
+        let state = self.inner.read().expect("work state poisoned");
+        (
+            state.generation,
+            state.header.clone(),
+            state.randomx_seed_height,
+            state.randomx_seed,
+        )
+    }
+
+    fn submission_candidate(
+        &self,
+        generation: u64,
+        template_id: Hash32,
+        nonce: u64,
+        extra_nonce: u64,
+    ) -> Result<
+        (
+            BlockHeaderV1,
+            Hash32,
+            NativeBlockExecutionResultV1,
+            NativeStateV1,
+            NativeBlockBodyV1,
+        ),
+        String,
+    > {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| "work state poisoned".to_string())?;
+        if state.solved {
+            return Err("current work template is already solved".into());
+        }
+        if generation != state.generation || template_id != state.header.mining_template_id() {
+            return Err("stale mining work".into());
+        }
+
+        let mut header = state.header.clone();
+        header.nonce = nonce;
+        header.extra_nonce = extra_nonce;
+        Ok((
+            header,
+            state.randomx_seed,
+            state.execution.clone(),
+            state.native_state.clone(),
+            state.body.clone(),
+        ))
+    }
+
+    fn mark_solved(&self, generation: u64, template_id: Hash32) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| "work state poisoned".to_string())?;
+        if generation != state.generation || template_id != state.header.mining_template_id() {
+            return Err("mining work changed before acceptance".into());
+        }
+        state.solved = true;
+        Ok(())
+    }
+
+    fn is_solved(&self) -> Result<bool, String> {
+        self.inner
+            .read()
+            .map(|state| state.solved)
+            .map_err(|_| "work state poisoned".to_string())
+    }
+
+    pub fn replace(
+        &self,
+        header: BlockHeaderV1,
+        randomx_seed_height: u64,
+        randomx_seed: Hash32,
+        execution: NativeBlockExecutionResultV1,
+        native_state: NativeStateV1,
+    ) -> Result<u64, String> {
+        self.replace_with_body(
+            header,
+            randomx_seed_height,
+            randomx_seed,
+            execution,
+            native_state,
+            NativeBlockBodyV1::empty(),
+        )
+    }
+
+    pub fn replace_with_body(
+        &self,
+        header: BlockHeaderV1,
+        randomx_seed_height: u64,
+        randomx_seed: Hash32,
+        execution: NativeBlockExecutionResultV1,
+        native_state: NativeStateV1,
+        body: NativeBlockBodyV1,
+    ) -> Result<u64, String> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| "work state poisoned".to_string())?;
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "mining work generation overflow".to_string())?;
+        state.header = header;
+        state.randomx_seed_height = randomx_seed_height;
+        state.randomx_seed = randomx_seed;
+        state.execution = execution;
+        state.native_state = native_state;
+        state.body = body;
+        state.solved = false;
+        Ok(state.generation)
+    }
+
+    #[cfg(test)]
+    pub fn is_stale(&self, generation: u64, template_id: &[u8; 32]) -> bool {
+        let state = self.inner.read().expect("work state poisoned");
+        generation != state.generation || &state.header.mining_template_id() != template_id
+    }
+}
+
+pub fn spawn(
+    bind: SocketAddr,
+    work: WorkManager,
+    state: Arc<StateStore>,
+    mempool: SharedNativeMempoolV1,
+    fee_recipient: Address20,
+    running: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, String> {
+    let listener =
+        TcpListener::bind(bind).map_err(|e| format!("failed to bind mining RPC on {bind}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to configure mining RPC listener: {e}"))?;
+
+    info!(%bind, "mining RPC listening");
+
+    Ok(thread::spawn(move || {
+        while running.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, peer)) => {
+                    if let Err(e) =
+                        handle_connection(stream, &work, &state, &mempool, fee_recipient)
+                    {
+                        warn!(%peer, error = %e, "mining RPC request failed");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => {
+                    error!(error = %e, "mining RPC accept failed");
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }))
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    work: &WorkManager,
+    state: &StateStore,
+    mempool: &SharedNativeMempoolV1,
+    fee_recipient: Address20,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("failed to set RPC read timeout: {e}"))?;
+
+    let mut buf = [0_u8; 16 * 1024];
+    let size = stream
+        .read(&mut buf)
+        .map_err(|e| format!("failed to read RPC request: {e}"))?;
+
+    if size == 0 {
+        return Err("empty RPC request".into());
+    }
+
+    let request_text = String::from_utf8_lossy(&buf[..size]);
+    let body = request_text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .ok_or_else(|| "malformed HTTP request".to_string())?;
+
+    let request: Value =
+        serde_json::from_str(body).map_err(|e| format!("invalid JSON-RPC request: {e}"))?;
+
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "JSON-RPC method missing".to_string())?;
+
+    let response = match method {
+        "pow_getWork" => {
+            if work.is_solved()? {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32001,
+                        "message": "current work template is solved; wait for template refresh"
+                    }
+                })
+            } else {
+                let (generation, header, randomx_seed_height, randomx_seed) = work.current();
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "development": true,
+                        "generation": generation,
+                        "template_id": hex::encode(header.mining_template_id()),
+                        "version": header.version,
+                        "parent_hash": hex::encode(header.parent_hash),
+                        "height": header.height,
+                        "timestamp": header.timestamp,
+                        "transactions_root": hex::encode(header.transactions_root),
+                        "execution_root": hex::encode(header.execution_root),
+                        "target": hex::encode(header.target),
+                        "randomx_seed_height": randomx_seed_height,
+                        "randomx_seed": hex::encode(randomx_seed),
+                        "nonce_start": 0_u64,
+                        "nonce_end": u64::MAX,
+                        "extra_nonce_start": 0_u64,
+                        "extra_nonce_end": u64::MAX
+                    }
+                })
+            }
+        }
+        "niah_sendRawTransaction" => {
+            let result = request
+                .get("params")
+                .and_then(Value::as_object)
+                .and_then(|params| params.get("transaction"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "niah_sendRawTransaction params.transaction must be canonical transaction hex"
+                        .to_string()
+                })
+                .and_then(|raw| submit_raw_transaction_hex(raw, mempool));
+
+            match result {
+                Ok(tx_id) => {
+                    if state.best_chain_head()?.is_some() {
+                        install_next_native_work_from_mempool(work, state, mempool, fee_recipient)?;
+                    }
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "tx_id": tx_id,
+                            "mempool_count": mempool_size(mempool)?
+                        }
+                    })
+                }
+                Err(message) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32010,
+                        "message": message
+                    }
+                }),
+            }
+        }
+        "niah_getMempoolInfo" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "transaction_count": mempool_size(mempool)?
+            }
+        }),
+        "pow_submitWork" => {
+            match submit_work_with_mempool(&request, work, state, mempool, fee_recipient) {
+                Ok(result) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }),
+                Err(message) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32002,
+                        "message": message
+                    }
+                }),
+            }
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": "method not found"
+            }
+        }),
+    };
+
+    let payload = serde_json::to_vec(&response)
+        .map_err(|e| format!("failed to encode JSON-RPC response: {e}"))?;
+
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+
+    stream
+        .write_all(headers.as_bytes())
+        .and_then(|_| stream.write_all(&payload))
+        .map_err(|e| format!("failed to write RPC response: {e}"))
+}
+
+#[cfg(test)]
+fn submit_work(
+    request: &Value,
+    work: &WorkManager,
+    state: &StateStore,
+    fee_recipient: Option<Address20>,
+) -> Result<Value, String> {
+    submit_work_internal(request, work, state, None, fee_recipient)
+}
+
+fn submit_work_with_mempool(
+    request: &Value,
+    work: &WorkManager,
+    state: &StateStore,
+    mempool: &SharedNativeMempoolV1,
+    fee_recipient: Address20,
+) -> Result<Value, String> {
+    submit_work_internal(request, work, state, Some(mempool), Some(fee_recipient))
+}
+
+fn remove_body_transactions_from_mempool(
+    mempool: &SharedNativeMempoolV1,
+    body: &NativeBlockBodyV1,
+) -> Result<(), String> {
+    let tx_ids = body
+        .decoded_transactions()?
+        .into_iter()
+        .map(|transaction| transaction.tx_id())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut pool = mempool
+        .write()
+        .map_err(|_| "native mempool lock poisoned".to_string())?;
+    for tx_id in tx_ids {
+        pool.remove(&tx_id);
+    }
+    Ok(())
+}
+
+fn submit_work_internal(
+    request: &Value,
+    work: &WorkManager,
+    state: &StateStore,
+    mempool: Option<&SharedNativeMempoolV1>,
+    fee_recipient: Option<Address20>,
+) -> Result<Value, String> {
+    let params = request
+        .get("params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "pow_submitWork params must be an object".to_string())?;
+
+    let generation = params
+        .get("generation")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "pow_submitWork generation must be a u64".to_string())?;
+    let template_id = parse_hash32_hex(
+        params
+            .get("template_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "pow_submitWork template_id must be hex".to_string())?,
+    )?;
+    let nonce = params
+        .get("nonce")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "pow_submitWork nonce must be a u64".to_string())?;
+    let extra_nonce = params
+        .get("extra_nonce")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "pow_submitWork extra_nonce must be a u64".to_string())?;
+
+    let (header, seed, execution, native_state, body) =
+        work.submission_candidate(generation, template_id, nonce, extra_nonce)?;
+    let pow_hash = validate_block_candidate(&header, seed, state)?;
+    let outcome = state.insert_native_block_with_body_and_execution_outcome(
+        header,
+        &body,
+        &execution,
+        &native_state,
+    )?;
+
+    if outcome.current_best == outcome.block.block_id() {
+        if let Some(mempool) = mempool {
+            remove_body_transactions_from_mempool(mempool, &body)?;
+        }
+
+        match (mempool, fee_recipient) {
+            (Some(mempool), Some(fee_recipient)) => {
+                install_next_native_work_from_mempool(work, state, mempool, fee_recipient)?;
+            }
+            (None, Some(fee_recipient)) => {
+                install_next_native_work(work, state, fee_recipient)?;
+            }
+            _ => {
+                work.mark_solved(generation, template_id)?;
+            }
+        }
+    } else {
+        work.mark_solved(generation, template_id)?;
+    }
+
+    let reorg = outcome.reorg.as_ref().map(|reorg| {
+        json!({
+            "old_head": hex::encode(reorg.old_head),
+            "new_head": hex::encode(reorg.new_head),
+            "common_ancestor": hex::encode(reorg.common_ancestor),
+            "detached": reorg.detached.iter().map(hex::encode).collect::<Vec<_>>(),
+            "attached": reorg.attached.iter().map(hex::encode).collect::<Vec<_>>()
+        })
+    });
+
+    Ok(json!({
+        "accepted": true,
+        "block_id": hex::encode(outcome.block.block_id()),
+        "pow_hash": hex::encode(pow_hash),
+        "height": outcome.block.header.height,
+        "cumulative_work": outcome.block.chain_work.to_str_radix(10),
+        "became_canonical": outcome.current_best == outcome.block.block_id(),
+        "previous_best": outcome.previous_best.map(hex::encode),
+        "current_best": hex::encode(outcome.current_best),
+        "reorg": reorg
+    }))
+}
+
+pub(crate) fn install_next_native_work(
+    work: &WorkManager,
+    state: &StateStore,
+    fee_recipient: Address20,
+) -> Result<(), String> {
+    let parent = state
+        .best_chain_head()?
+        .ok_or_else(|| "accepted canonical block missing from state".to_string())?;
+    let height = parent
+        .header
+        .height
+        .checked_add(1)
+        .ok_or_else(|| "NIAHCIA height overflow".to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error while refreshing mining work: {e}"))?
+        .as_secs();
+    let timestamp = now.max(parent.header.timestamp.saturating_add(1));
+
+    let genesis = state
+        .canonical_block_at_height(0)?
+        .ok_or_else(|| "canonical chain is missing devnet genesis".to_string())?;
+    let target = devnet_next_target(
+        genesis.header.timestamp,
+        parent.header.height,
+        parent.header.timestamp,
+    )?;
+
+    let mut native_state = state
+        .native_state_snapshot(parent.block_id())?
+        .ok_or_else(|| "canonical parent is missing native state snapshot".to_string())?;
+
+    let execution = execute_block_v1(
+        &mut native_state,
+        &[],
+        AddressNetwork::Devnet,
+        NativeExecutionContextV1 {
+            base_fee_per_gas: 0,
+            cpu_producer: fee_recipient,
+        },
+    )?;
+
+    let header = BlockHeaderV1 {
+        version: 1,
+        parent_hash: parent.block_id(),
+        height,
+        timestamp,
+        transactions_root: execution.transactions_root,
+        execution_root: execution.execution_root,
+        target,
+        nonce: 0,
+        extra_nonce: 0,
+    };
+
+    let seed_height = randomx_seed_height(height);
+    let seed_block = state
+        .canonical_block_at_height(seed_height)?
+        .ok_or_else(|| format!("canonical chain missing RandomX seed block {seed_height}"))?;
+    let seed = randomx_seed(seed_block.block_id());
+
+    let next_generation = work.replace(header, seed_height, seed, execution, native_state)?;
+
+    info!(
+        generation = next_generation,
+        height, "installed next native NIAHCIA mining template"
+    );
+
+    Ok(())
+}
+
+pub(crate) fn install_next_native_work_from_mempool(
+    work: &WorkManager,
+    state: &StateStore,
+    mempool: &SharedNativeMempoolV1,
+    fee_recipient: Address20,
+) -> Result<(), String> {
+    let parent = state
+        .best_chain_head()?
+        .ok_or_else(|| "accepted canonical block missing from state".to_string())?;
+    let height = parent
+        .header
+        .height
+        .checked_add(1)
+        .ok_or_else(|| "NIAHCIA height overflow".to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error while refreshing mining work: {e}"))?
+        .as_secs();
+    let timestamp = now.max(parent.header.timestamp.saturating_add(1));
+
+    let genesis = state
+        .canonical_block_at_height(0)?
+        .ok_or_else(|| "canonical chain is missing devnet genesis".to_string())?;
+    let target = devnet_next_target(
+        genesis.header.timestamp,
+        parent.header.height,
+        parent.header.timestamp,
+    )?;
+
+    let parent_state = state
+        .native_state_snapshot(parent.block_id())?
+        .ok_or_else(|| "canonical parent is missing native state snapshot".to_string())?;
+
+    let entries = {
+        let pool = mempool
+            .read()
+            .map_err(|_| "native mempool lock poisoned".to_string())?;
+        pool.ordered_entries()
+            .map(|entry| (entry.transaction.clone(), entry.canonical_bytes.len()))
+            .collect::<Vec<_>>()
+    };
+
+    let mut selected = Vec::new();
+    let mut selected_bytes = 0usize;
+
+    for (transaction, transaction_bytes) in entries {
+        if selected.len() >= MAX_TEMPLATE_TRANSACTIONS_V1 {
+            break;
+        }
+        if selected_bytes.saturating_add(transaction_bytes) > MAX_TEMPLATE_TRANSACTION_BYTES_V1 {
+            continue;
+        }
+
+        let mut candidate_transactions = selected.clone();
+        candidate_transactions.push(transaction);
+
+        let mut trial_state = parent_state.clone();
+        if execute_block_v1(
+            &mut trial_state,
+            &candidate_transactions,
+            AddressNetwork::Devnet,
+            NativeExecutionContextV1 {
+                base_fee_per_gas: 0,
+                cpu_producer: fee_recipient,
+            },
+        )
+        .is_ok()
+        {
+            selected = candidate_transactions;
+            selected_bytes = selected_bytes.saturating_add(transaction_bytes);
+        }
+    }
+
+    let mut native_state = parent_state;
+    let execution = execute_block_v1(
+        &mut native_state,
+        &selected,
+        AddressNetwork::Devnet,
+        NativeExecutionContextV1 {
+            base_fee_per_gas: 0,
+            cpu_producer: fee_recipient,
+        },
+    )?;
+
+    let body_recipient = if execution.producer_priority_fee == 0 {
+        [0_u8; 20]
+    } else {
+        fee_recipient
+    };
+    let body = NativeBlockBodyV1::from_transactions(body_recipient, &selected)?;
+
+    let header = BlockHeaderV1 {
+        version: 1,
+        parent_hash: parent.block_id(),
+        height,
+        timestamp,
+        transactions_root: execution.transactions_root,
+        execution_root: execution.execution_root,
+        target,
+        nonce: 0,
+        extra_nonce: 0,
+    };
+
+    let seed_height = randomx_seed_height(height);
+    let seed_block = state
+        .canonical_block_at_height(seed_height)?
+        .ok_or_else(|| format!("canonical chain missing RandomX seed block {seed_height}"))?;
+    let seed = randomx_seed(seed_block.block_id());
+
+    let tx_count = selected.len();
+    let next_generation =
+        work.replace_with_body(header, seed_height, seed, execution, native_state, body)?;
+
+    info!(
+        generation = next_generation,
+        height,
+        tx_count,
+        selected_bytes,
+        "installed next native NIAHCIA mining template from mempool"
+    );
+
+    Ok(())
+}
+
+pub(crate) fn validate_block_candidate(
+    header: &BlockHeaderV1,
+    seed: Hash32,
+    state: &StateStore,
+) -> Result<Hash32, String> {
+    let adjusted_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error during block validation: {e}"))?
+        .as_secs();
+
+    let mut ancestor_timestamps = Vec::with_capacity(MEDIAN_TIME_WINDOW);
+    let expected_target = if header.height == 0 {
+        if header.parent_hash != [0_u8; 32] {
+            return Err("genesis block must have a zero parent hash".into());
+        }
+        DEVNET_GENESIS_TARGET
+    } else {
+        let mut cursor = state
+            .load_chain_block(header.parent_hash)?
+            .ok_or_else(|| "candidate parent is not persisted".to_string())?;
+        if cursor.header.height.checked_add(1) != Some(header.height) {
+            return Err("candidate height does not follow persisted parent".into());
+        }
+
+        let parent_height = cursor.header.height;
+        let parent_timestamp = cursor.header.timestamp;
+        let genesis_timestamp = loop {
+            ancestor_timestamps.push(cursor.header.timestamp);
+            if cursor.header.height == 0 {
+                break cursor.header.timestamp;
+            }
+            let parent = state
+                .load_chain_block(cursor.header.parent_hash)?
+                .ok_or_else(|| "candidate ancestry references missing parent".to_string())?;
+            if ancestor_timestamps.len() < MEDIAN_TIME_WINDOW {
+                cursor = parent;
+            } else {
+                let mut genesis_cursor = parent;
+                while genesis_cursor.header.height != 0 {
+                    genesis_cursor = state
+                        .load_chain_block(genesis_cursor.header.parent_hash)?
+                        .ok_or_else(|| {
+                            "candidate ancestry references missing parent".to_string()
+                        })?;
+                }
+                break genesis_cursor.header.timestamp;
+            }
+        };
+
+        devnet_next_target(genesis_timestamp, parent_height, parent_timestamp)?
+    };
+
+    if header.target != expected_target {
+        return Err(format!(
+            "candidate target {} does not match expected devnet target {}",
+            hex::encode(header.target),
+            hex::encode(expected_target)
+        ));
+    }
+
+    validate_timestamp(header.timestamp, &ancestor_timestamps, adjusted_time)?;
+    RandomXVerifier::new(seed)?.verify_header(header)
+}
+
+fn parse_hash32_hex(value: &str) -> Result<Hash32, String> {
+    let raw = value.strip_prefix("0x").unwrap_or(value);
+    let bytes = hex::decode(raw).map_err(|e| format!("invalid 32-byte hex value: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("expected 32-byte hex value; found {} bytes", v.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        install_next_native_work_from_mempool, submit_work, submit_work_with_mempool, WorkManager,
+    };
+    use crate::address::AddressNetwork;
+    use crate::native_execution::{
+        execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
+    };
+    use crate::native_mempool::NativeMempoolV1;
+    use crate::native_rpc::SharedNativeMempoolV1;
+    use crate::native_transaction::{
+        NativeActionV1, NativeTransactionBodyV1, SignedNativeTransactionV1, DEVNET_CHAIN_ID,
+        DEVNET_NETWORK_ID, NATIVE_TRANSFER_GAS_V1,
+    };
+    use crate::state::StateStore;
+    use crate::work::BlockHeaderV1;
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use serde_json::json;
+    use std::sync::{Arc, RwLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_state_path(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "niahcia-mining-{name}-{}-{nonce}.redb",
+            std::process::id()
+        ))
+    }
+
+    fn header(marker: u8) -> BlockHeaderV1 {
+        BlockHeaderV1 {
+            version: 1,
+            parent_hash: [marker; 32],
+            height: marker as u64,
+            timestamp: 1_800_000_000 + marker as u64,
+            transactions_root: [marker.wrapping_add(1); 32],
+            execution_root: [marker.wrapping_add(2); 32],
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        }
+    }
+
+    fn signed_template_transfer(
+        signing_byte: u8,
+        nonce: u64,
+        recipient: [u8; 20],
+        value: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> SignedNativeTransactionV1 {
+        let signing_key = SigningKey::from_slice(&[signing_byte; 32]).unwrap();
+        let public_key = signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+
+        let mut transaction = SignedNativeTransactionV1 {
+            body: NativeTransactionBodyV1 {
+                network_id: DEVNET_NETWORK_ID,
+                chain_id: DEVNET_CHAIN_ID,
+                nonce,
+                action: NativeActionV1::Transfer,
+                target_payload: recipient.to_vec(),
+                value,
+                gas_limit: NATIVE_TRANSFER_GAS_V1,
+                max_fee_per_gas: max_priority_fee_per_gas,
+                max_priority_fee_per_gas,
+                data: Vec::new(),
+            },
+            public_key,
+            signature: vec![0; 64],
+        };
+
+        let digest = transaction.signing_digest().unwrap();
+        let signature: Signature = signing_key.sign_prehash(&digest).unwrap();
+        transaction.signature = signature.to_bytes().to_vec();
+        transaction
+    }
+
+    fn canonical_parent_with_state(
+        store: &StateStore,
+        state: NativeStateV1,
+    ) -> (BlockHeaderV1, NativeStateV1) {
+        let execution = execute_block_v1(
+            &mut state.clone(),
+            &[],
+            AddressNetwork::Devnet,
+            NativeExecutionContextV1 {
+                base_fee_per_gas: 0,
+                cpu_producer: [0_u8; 20],
+            },
+        )
+        .unwrap();
+
+        let block = BlockHeaderV1 {
+            version: 1,
+            parent_hash: [0_u8; 32],
+            height: 0,
+            timestamp: 1_800_000_000,
+            transactions_root: execution.transactions_root,
+            execution_root: execution.execution_root,
+            target: crate::consensus::DEVNET_GENESIS_TARGET,
+            nonce: 0,
+            extra_nonce: 0,
+        };
+
+        store.insert_chain_block(block.clone()).unwrap();
+        store
+            .store_native_state_snapshot(block.block_id(), &state)
+            .unwrap();
+        (block, state)
+    }
+
+    fn test_work_manager(parent: &BlockHeaderV1) -> WorkManager {
+        let mut state = NativeStateV1::default();
+        let execution = execute_block_v1(
+            &mut state,
+            &[],
+            AddressNetwork::Devnet,
+            NativeExecutionContextV1 {
+                base_fee_per_gas: 0,
+                cpu_producer: [0_u8; 20],
+            },
+        )
+        .unwrap();
+        WorkManager::new(
+            BlockHeaderV1 {
+                version: 1,
+                parent_hash: parent.block_id(),
+                height: 1,
+                timestamp: parent.timestamp + 1,
+                transactions_root: execution.transactions_root,
+                execution_root: execution.execution_root,
+                target: [0xff; 32],
+                nonce: 0,
+                extra_nonce: 0,
+            },
+            0,
+            [0_u8; 32],
+            execution,
+            state,
+        )
+    }
+
+    fn native_fixture() -> (NativeBlockExecutionResultV1, NativeStateV1) {
+        let mut state = NativeStateV1::default();
+        let execution = execute_block_v1(
+            &mut state,
+            &[],
+            AddressNetwork::Devnet,
+            NativeExecutionContextV1 {
+                base_fee_per_gas: 0,
+                cpu_producer: [0x09; 20],
+            },
+        )
+        .unwrap();
+        (execution, state)
+    }
+
+    #[test]
+    fn mempool_template_includes_valid_transaction_and_exact_body() {
+        let path = temp_state_path("mempool-template-valid");
+        let store = StateStore::open(&path).unwrap();
+
+        let transaction = signed_template_transfer(1, 0, [0x22; 20], 100, 0);
+        let sender = transaction
+            .authenticated_sender(AddressNetwork::Devnet)
+            .unwrap()
+            .payload;
+
+        let mut parent_state = NativeStateV1::default();
+        parent_state.credit(sender, 1_000).unwrap();
+        let (parent, _) = canonical_parent_with_state(&store, parent_state);
+
+        let mempool: SharedNativeMempoolV1 =
+            Arc::new(RwLock::new(NativeMempoolV1::new(AddressNetwork::Devnet)));
+        mempool
+            .write()
+            .unwrap()
+            .admit_transaction(transaction.clone())
+            .unwrap();
+
+        let manager = test_work_manager(&parent);
+        install_next_native_work_from_mempool(&manager, &store, &mempool, [0x77; 20]).unwrap();
+
+        let (generation, header, _, _) = manager.current();
+        let (_, _, execution, resulting_state, body) = manager
+            .submission_candidate(generation, header.mining_template_id(), 0, 0)
+            .unwrap();
+
+        assert_eq!(body.decoded_transactions().unwrap(), vec![transaction]);
+        assert_eq!(body.producer_fee_recipient, [0_u8; 20]);
+        assert_eq!(execution.producer_priority_fee, 0);
+        assert_eq!(header.transactions_root, execution.transactions_root);
+        assert_eq!(header.execution_root, execution.execution_root);
+        assert_eq!(resulting_state.account([0x22; 20]).balance, 100);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mempool_template_skips_state_invalid_transaction() {
+        let path = temp_state_path("mempool-template-skip-invalid");
+        let store = StateStore::open(&path).unwrap();
+
+        let valid = signed_template_transfer(1, 0, [0x22; 20], 100, 0);
+        let invalid = signed_template_transfer(2, 7, [0x33; 20], 100, 0);
+
+        let valid_sender = valid
+            .authenticated_sender(AddressNetwork::Devnet)
+            .unwrap()
+            .payload;
+        let invalid_sender = invalid
+            .authenticated_sender(AddressNetwork::Devnet)
+            .unwrap()
+            .payload;
+
+        let mut parent_state = NativeStateV1::default();
+        parent_state.credit(valid_sender, 1_000).unwrap();
+        parent_state.credit(invalid_sender, 1_000).unwrap();
+        let (parent, _) = canonical_parent_with_state(&store, parent_state);
+
+        let mempool: SharedNativeMempoolV1 =
+            Arc::new(RwLock::new(NativeMempoolV1::new(AddressNetwork::Devnet)));
+        {
+            let mut pool = mempool.write().unwrap();
+            pool.admit_transaction(valid.clone()).unwrap();
+            pool.admit_transaction(invalid).unwrap();
+        }
+
+        let manager = test_work_manager(&parent);
+        install_next_native_work_from_mempool(&manager, &store, &mempool, [0x77; 20]).unwrap();
+
+        let (generation, header, _, _) = manager.current();
+        let (_, _, _, _, body) = manager
+            .submission_candidate(generation, header.mining_template_id(), 0, 0)
+            .unwrap();
+
+        assert_eq!(body.decoded_transactions().unwrap(), vec![valid]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn solved_non_empty_template_persists_exact_body_and_evicts_mempool() {
+        let path = temp_state_path("submit-non-empty-body");
+        let store = StateStore::open(&path).unwrap();
+
+        let transaction = signed_template_transfer(1, 0, [0x22; 20], 0, 0);
+        let canonical = transaction.canonical_bytes().unwrap();
+        let tx_id = transaction.tx_id().unwrap();
+
+        let mut native_state = NativeStateV1::default();
+        let execution = execute_block_v1(
+            &mut native_state,
+            std::slice::from_ref(&transaction),
+            AddressNetwork::Devnet,
+            NativeExecutionContextV1 {
+                base_fee_per_gas: 0,
+                cpu_producer: [0_u8; 20],
+            },
+        )
+        .unwrap();
+
+        let body = crate::native_block_body::NativeBlockBodyV1::from_transactions(
+            [0_u8; 20],
+            std::slice::from_ref(&transaction),
+        )
+        .unwrap();
+
+        let header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: [0_u8; 32],
+            height: 0,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            transactions_root: execution.transactions_root,
+            execution_root: execution.execution_root,
+            target: crate::consensus::DEVNET_GENESIS_TARGET,
+            nonce: 0,
+            extra_nonce: 0,
+        };
+
+        let manager = WorkManager::new_with_body(
+            header.clone(),
+            0,
+            [0x42; 32],
+            execution,
+            native_state,
+            body.clone(),
+        );
+
+        let mempool: SharedNativeMempoolV1 =
+            Arc::new(RwLock::new(NativeMempoolV1::new(AddressNetwork::Devnet)));
+        mempool
+            .write()
+            .unwrap()
+            .admit_canonical_bytes(&canonical)
+            .unwrap();
+
+        let request = json!({
+            "params": {
+                "generation": 0,
+                "template_id": hex::encode(header.mining_template_id()),
+                "nonce": 7,
+                "extra_nonce": 9
+            }
+        });
+
+        let result =
+            submit_work_with_mempool(&request, &manager, &store, &mempool, [0x77; 20]).unwrap();
+        assert_eq!(result["accepted"], true);
+        assert!(!mempool.read().unwrap().contains(&tx_id));
+
+        let mut solved = header;
+        solved.nonce = 7;
+        solved.extra_nonce = 9;
+        let block_id = solved.block_id();
+
+        assert_eq!(
+            store.native_block_body(block_id).unwrap(),
+            Some(body.clone())
+        );
+
+        drop(store);
+        let reopened = StateStore::open(&path).unwrap();
+        assert_eq!(reopened.native_block_body(block_id).unwrap(), Some(body));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn submit_work_independently_verifies_and_persists_block() {
+        let path = temp_state_path("submit-valid");
+        let store = StateStore::open(&path).unwrap();
+
+        let (execution, native_state) = native_fixture();
+        let header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: [0_u8; 32],
+            height: 0,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            transactions_root: execution.transactions_root,
+            execution_root: execution.execution_root,
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        };
+        let manager = WorkManager::new(header.clone(), 0, [0x42; 32], execution, native_state);
+        let template_id = header.mining_template_id();
+
+        let request = json!({
+            "params": {
+                "generation": 0,
+                "template_id": hex::encode(template_id),
+                "nonce": 7,
+                "extra_nonce": 9
+            }
+        });
+
+        let result = submit_work(&request, &manager, &store, None).unwrap();
+        assert_eq!(result["accepted"], true);
+
+        let mut solved = header;
+        solved.nonce = 7;
+        solved.extra_nonce = 9;
+        let persisted = store.load_chain_block(solved.block_id()).unwrap().unwrap();
+        assert_eq!(persisted.header, solved);
+        assert_eq!(result["became_canonical"], true);
+        assert_eq!(result["current_best"], hex::encode(solved.block_id()));
+        assert!(manager.is_solved().unwrap());
+
+        let duplicate = submit_work(&request, &manager, &store, None).unwrap_err();
+        assert_eq!(duplicate, "current work template is already solved");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn submit_work_rejects_future_timestamp_before_persistence() {
+        let path = temp_state_path("submit-future-time");
+        let store = StateStore::open(&path).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: [0_u8; 32],
+            height: 0,
+            timestamp: now + crate::consensus::MAX_FUTURE_DRIFT + 1,
+            transactions_root: [0x22; 32],
+            execution_root: [0x33; 32],
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        };
+        let (execution, native_state) = native_fixture();
+        let manager = WorkManager::new(header.clone(), 0, [0x42; 32], execution, native_state);
+        let request = json!({
+            "params": {
+                "generation": 0,
+                "template_id": hex::encode(header.mining_template_id()),
+                "nonce": 7,
+                "extra_nonce": 9
+            }
+        });
+
+        assert!(submit_work(&request, &manager, &store, None)
+            .unwrap_err()
+            .contains("exceeds maximum future time"));
+        assert!(store.best_chain_head().unwrap().is_none());
+        assert!(!manager.is_solved().unwrap());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn submit_work_rejects_stale_template_before_hashing() {
+        let path = temp_state_path("submit-stale");
+        let store = StateStore::open(&path).unwrap();
+        let header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: [0_u8; 32],
+            height: 0,
+            timestamp: 1_800_000_000,
+            transactions_root: [0x22; 32],
+            execution_root: [0x33; 32],
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        };
+        let (execution, native_state) = native_fixture();
+        let manager = WorkManager::new(header, 0, [0x42; 32], execution, native_state);
+
+        let request = json!({
+            "params": {
+                "generation": 99,
+                "template_id": hex::encode([0x55_u8; 32]),
+                "nonce": 7,
+                "extra_nonce": 9
+            }
+        });
+
+        assert_eq!(
+            submit_work(&request, &manager, &store, None).unwrap_err(),
+            "stale mining work"
+        );
+        assert!(store.best_chain_head().unwrap().is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replacing_work_marks_previous_generation_stale() {
+        let (execution, native_state) = native_fixture();
+        let manager = WorkManager::new(
+            header(1),
+            0,
+            [0x33; 32],
+            execution.clone(),
+            native_state.clone(),
+        );
+        let (generation, current, _, _) = manager.current();
+        let old_id = current.mining_template_id();
+
+        assert!(!manager.is_stale(generation, &old_id));
+
+        manager
+            .replace(header(2), 0, [0x42; 32], execution, native_state)
+            .unwrap();
+
+        assert!(manager.is_stale(generation, &old_id));
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "niahcia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NIAHCIA reference node"
+
+[[bin]]
+name = "niahcia"
+path = "src/main.rs"
+
+[dependencies]
+bech32 = "0.11"
+ctrlc = { version = "3.4", features = ["termination"] }
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+redb = "2"
+randomx-rs = "1.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha3 = "0.10"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

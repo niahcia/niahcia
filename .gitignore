@@ -1,0 +1,8 @@
+/target/
+*.log
+.env
+.DS_Store
+/devnet/jwt.hex
+/devnet/niahcia.toml
+/devnet/reth-data/
+/devnet/niahcia-data/
