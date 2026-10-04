@@ -3,23 +3,17 @@ use crate::consensus::{
     devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
     DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
 };
-#[cfg(test)]
 use crate::native_activation_v2::{NativeExecutionActivationV3, NativeExecutionVersion};
 use crate::native_block_body::NativeBlockBodyV1;
 use crate::native_block_body_v2::NativeBlockBodyV2;
-#[cfg(test)]
 use crate::native_block_execution_v2::execute_inactive_versioned_block_v2;
-#[cfg(test)]
 use crate::native_block_execution_v3::execute_inactive_versioned_block_v3;
-#[cfg(test)]
 use crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1;
 use crate::native_execution::{
     execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
 };
-#[cfg(test)]
 use crate::native_execution_commitment_v2::build_inactive_execution_result_v2;
 use crate::native_execution_commitment_v2::NativeBlockExecutionResultV2;
-#[cfg(test)]
 use crate::native_execution_commitment_v3::build_inactive_execution_result_v3;
 use crate::native_execution_commitment_v3::NativeBlockExecutionResultV3;
 use crate::native_rpc::{mempool_size, submit_raw_transaction_hex, SharedNativeMempoolV1};
@@ -233,6 +227,29 @@ impl WorkManager {
             native_state,
             body,
         };
+        state.solved = false;
+        Ok(state.generation)
+    }
+
+    fn replace_payload(
+        &self,
+        header: BlockHeaderV1,
+        randomx_seed_height: u64,
+        randomx_seed: Hash32,
+        payload: NativeWorkPayload,
+    ) -> Result<u64, String> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| "work state poisoned".to_string())?;
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "mining work generation overflow".to_string())?;
+        state.header = header;
+        state.randomx_seed_height = randomx_seed_height;
+        state.randomx_seed = randomx_seed;
+        state.payload = payload;
         state.solved = false;
         Ok(state.generation)
     }
@@ -606,8 +623,6 @@ fn submit_work_internal(
     }))
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
 fn build_inactive_versioned_empty_work_payload(
     state: &StateStore,
     parent_id: Hash32,
@@ -678,6 +693,81 @@ fn build_inactive_versioned_empty_work_payload(
             })
         }
     }
+}
+
+pub(crate) fn install_next_native_work_with_activation(
+    work: &WorkManager,
+    state: &StateStore,
+    fee_recipient: Address20,
+    activation: NativeExecutionActivationV3,
+    registry: &NativeContractRuntimeRegistryV1,
+) -> Result<(), String> {
+    let parent = state
+        .best_chain_head()?
+        .ok_or_else(|| "accepted canonical block missing from state".to_string())?;
+    let height = parent
+        .header
+        .height
+        .checked_add(1)
+        .ok_or_else(|| "NIAHCIA height overflow".to_string())?;
+    if activation.execution_version_at_height(height)? == NativeExecutionVersion::V1 {
+        return install_next_native_work(work, state, fee_recipient);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error while refreshing mining work: {e}"))?
+        .as_secs();
+    let timestamp = now.max(parent.header.timestamp.saturating_add(1));
+    let genesis = state
+        .canonical_block_at_height(0)?
+        .ok_or_else(|| "canonical chain is missing devnet genesis".to_string())?;
+    let target = devnet_next_target(
+        genesis.header.timestamp,
+        parent.header.height,
+        parent.header.timestamp,
+    )?;
+    let payload = build_inactive_versioned_empty_work_payload(
+        state,
+        parent.block_id(),
+        parent.header.height,
+        height,
+        fee_recipient,
+        activation,
+        registry,
+    )?;
+    let (transactions_root, execution_root) = match &payload {
+        NativeWorkPayload::V1 { .. } => unreachable!("V1 handled by legacy installer"),
+        NativeWorkPayload::V2 { execution, .. } => {
+            (execution.transactions_root, execution.execution_root)
+        }
+        NativeWorkPayload::V3 { execution, .. } => {
+            (execution.transactions_root, execution.execution_root)
+        }
+    };
+    let header = BlockHeaderV1 {
+        version: 1,
+        parent_hash: parent.block_id(),
+        height,
+        timestamp,
+        transactions_root,
+        execution_root,
+        target,
+        nonce: 0,
+        extra_nonce: 0,
+    };
+    let seed_height = randomx_seed_height(height);
+    let seed_block = state
+        .canonical_block_at_height(seed_height)?
+        .ok_or_else(|| format!("canonical chain missing RandomX seed block {seed_height}"))?;
+    let seed = randomx_seed(seed_block.block_id());
+    let next_generation = work.replace_payload(header, seed_height, seed, payload)?;
+
+    info!(
+        generation = next_generation,
+        height, "installed activation-aware native NIAHCIA mining template"
+    );
+    Ok(())
 }
 
 pub(crate) fn install_next_native_work(
