@@ -951,8 +951,8 @@ fn parse_hash32_hex(value: &str) -> Result<Hash32, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_next_native_work_from_mempool, submit_work, submit_work_with_mempool,
-        NativeWorkPayload, WorkManager,
+        build_inactive_versioned_empty_work_payload, install_next_native_work_from_mempool,
+        submit_work, submit_work_with_mempool, NativeWorkPayload, WorkManager,
     };
     use crate::address::AddressNetwork;
     use crate::native_execution::{
@@ -1468,4 +1468,126 @@ mod tests {
 
         assert!(manager.is_stale(generation, &old_id));
     }
+    #[test]
+    fn activation_builder_persists_v1_v2_v3_sequence_across_restart() {
+        let path = temp_state_path("v1-v2-v3-activation-sequence");
+        let store = StateStore::open(&path).unwrap();
+        let (genesis, _) = canonical_parent_with_state(&store, NativeStateV1::default());
+        let activation = crate::native_activation_v2::NativeExecutionActivationV3 {
+            v2_activation_height: 1,
+            v3_activation_height: 2,
+        };
+        let registry =
+            crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1::default();
+
+        let v2_payload = build_inactive_versioned_empty_work_payload(
+            &store,
+            genesis.block_id(),
+            0,
+            1,
+            [0_u8; 20],
+            activation,
+            &registry,
+        )
+        .unwrap();
+        let NativeWorkPayload::V2 {
+            execution: v2_execution,
+            native_state: v2_state,
+            body: v2_body,
+        } = v2_payload
+        else {
+            panic!("height 1 did not build V2 work");
+        };
+        let v2_header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: genesis.block_id(),
+            height: 1,
+            timestamp: genesis.timestamp + 1,
+            transactions_root: v2_execution.transactions_root,
+            execution_root: v2_execution.execution_root,
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        };
+        let v2_id = v2_header.block_id();
+        store
+            .insert_inactive_native_v2_block_with_body_and_execution_outcome(
+                v2_header,
+                &v2_body,
+                &v2_execution,
+                &v2_state,
+            )
+            .unwrap();
+
+        let v3_payload = build_inactive_versioned_empty_work_payload(
+            &store,
+            v2_id,
+            1,
+            2,
+            [0_u8; 20],
+            activation,
+            &registry,
+        )
+        .unwrap();
+        let NativeWorkPayload::V3 {
+            execution: v3_execution,
+            native_state: v3_state,
+            body: v3_body,
+        } = v3_payload
+        else {
+            panic!("height 2 did not build V3 work");
+        };
+        let v3_header = BlockHeaderV1 {
+            version: 1,
+            parent_hash: v2_id,
+            height: 2,
+            timestamp: genesis.timestamp + 2,
+            transactions_root: v3_execution.transactions_root,
+            execution_root: v3_execution.execution_root,
+            target: [0xff; 32],
+            nonce: 0,
+            extra_nonce: 0,
+        };
+        let v3_id = v3_header.block_id();
+        store
+            .insert_inactive_native_v3_block_with_body_and_execution_outcome(
+                v3_header,
+                &v3_body,
+                &v3_execution,
+                &v3_state,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.inactive_native_state_v2_snapshot(v2_id).unwrap(),
+            Some(v2_state.clone())
+        );
+        assert_eq!(
+            store.inactive_native_state_v3_snapshot(v3_id).unwrap(),
+            Some(v3_state.clone())
+        );
+        drop(store);
+
+        let reopened = StateStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.inactive_native_state_v2_snapshot(v2_id).unwrap(),
+            Some(v2_state)
+        );
+        assert_eq!(
+            reopened.inactive_native_state_v3_snapshot(v3_id).unwrap(),
+            Some(v3_state)
+        );
+        assert_eq!(
+            reopened
+                .inactive_native_block_execution_v3(v3_id)
+                .unwrap()
+                .unwrap()
+                .execution_root,
+            v3_execution.execution_root
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
 }
