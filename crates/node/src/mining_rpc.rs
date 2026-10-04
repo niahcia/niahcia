@@ -36,6 +36,7 @@ pub struct WorkManager {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum NativeWorkPayload {
     V1 {
         execution: NativeBlockExecutionResultV1,
@@ -1078,9 +1079,17 @@ mod tests {
         install_next_native_work_from_mempool(&manager, &store, &mempool, [0x77; 20]).unwrap();
 
         let (generation, header, _, _) = manager.current();
-        let (_, _, execution, resulting_state, body) = manager
+        let (_, _, payload) = manager
             .submission_candidate(generation, header.mining_template_id(), 0, 0)
             .unwrap();
+        let NativeWorkPayload::V1 {
+            execution,
+            native_state: resulting_state,
+            body,
+        } = payload
+        else {
+            panic!("V1 mempool template produced non-V1 work payload");
+        };
 
         assert_eq!(body.decoded_transactions().unwrap(), vec![transaction]);
         assert_eq!(body.producer_fee_recipient, [0_u8; 20]);
@@ -1126,9 +1135,12 @@ mod tests {
         install_next_native_work_from_mempool(&manager, &store, &mempool, [0x77; 20]).unwrap();
 
         let (generation, header, _, _) = manager.current();
-        let (_, _, _, _, body) = manager
+        let (_, _, payload) = manager
             .submission_candidate(generation, header.mining_template_id(), 0, 0)
             .unwrap();
+        let NativeWorkPayload::V1 { body, .. } = payload else {
+            panic!("V1 mempool template produced non-V1 work payload");
+        };
 
         assert_eq!(body.decoded_transactions().unwrap(), vec![valid]);
 
