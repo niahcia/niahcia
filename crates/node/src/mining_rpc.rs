@@ -867,7 +867,8 @@ fn parse_hash32_hex(value: &str) -> Result<Hash32, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_next_native_work_from_mempool, submit_work, submit_work_with_mempool, WorkManager,
+        install_next_native_work_from_mempool, submit_work, submit_work_with_mempool,
+        NativeWorkPayload, WorkManager,
     };
     use crate::address::AddressNetwork;
     use crate::native_execution::{
