@@ -10,10 +10,6 @@ Canonical working repository for the reference blockchain/node implementation pl
 
 Responsibilities include CPU PoW consensus, RandomX integration, native transactions/execution/state, chain P2P, mining/native RPC, persistence/reorg/restart behavior, and inactive compute-settlement integration work.
 
-### `niahcia/niahcia-protocol`
-
-Synchronized protocol mirror retained during the current repository transition. Protocol-affecting changes must not leave this mirror contradicting the canonical working repository.
-
 ## Operational repositories
 
 - `niahcia-miner` — dedicated CPU mining software.
