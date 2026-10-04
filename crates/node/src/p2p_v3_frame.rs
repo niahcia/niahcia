@@ -218,8 +218,8 @@ fn io_error(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use crate::native_block_body::NativeBlockBodyV1;
-    use crate::p2p_v3_codec::NativeBlockBodyTransferV3;
     use crate::native_transaction::native_transactions_root_v1;
+    use crate::p2p_v3_codec::NativeBlockBodyTransferV3;
     use crate::work::BlockHeaderV1;
 
     fn block() -> BlockTransferV3 {
