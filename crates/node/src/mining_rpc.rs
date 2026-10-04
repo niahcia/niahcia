@@ -989,14 +989,11 @@ mod tests {
             producer_priority_fee: 0,
             receipts: Vec::new(),
         };
-        let work = WorkManager::new(
-            header(1),
-            0,
-            [0; 32],
-            execution,
-            NativeStateV1::default(),
+        let work = WorkManager::new(header(1), 0, [0; 32], execution, NativeStateV1::default());
+        assert_eq!(
+            work.execution_version(),
+            crate::native_activation_v2::NativeExecutionVersion::V1
         );
-        assert_eq!(work.execution_version(), crate::native_activation_v2::NativeExecutionVersion::V1);
         work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V1)
             .unwrap();
         assert!(work
