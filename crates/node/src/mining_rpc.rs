@@ -3,6 +3,7 @@ use crate::consensus::{
     devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
     DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
 };
+use crate::native_activation_v2::NativeExecutionVersion;
 use crate::native_block_body::NativeBlockBodyV1;
 use crate::native_execution::{
     execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
@@ -31,6 +32,7 @@ pub struct WorkManager {
 #[derive(Clone)]
 struct WorkState {
     generation: u64,
+    execution_version: NativeExecutionVersion,
     header: BlockHeaderV1,
     randomx_seed_height: u64,
     randomx_seed: [u8; 32],
@@ -69,6 +71,7 @@ impl WorkManager {
         Self {
             inner: Arc::new(RwLock::new(WorkState {
                 generation: 0,
+                execution_version: NativeExecutionVersion::V1,
                 header,
                 randomx_seed_height,
                 randomx_seed,
@@ -78,6 +81,13 @@ impl WorkManager {
                 solved: false,
             })),
         }
+    }
+
+    pub fn execution_version(&self) -> NativeExecutionVersion {
+        self.inner
+            .read()
+            .expect("work state poisoned")
+            .execution_version
     }
 
     pub fn current(&self) -> (u64, BlockHeaderV1, u64, [u8; 32]) {
@@ -179,6 +189,7 @@ impl WorkManager {
             .inner
             .write()
             .map_err(|_| "work state poisoned".to_string())?;
+        state.execution_version = NativeExecutionVersion::V1;
         state.generation = state
             .generation
             .checked_add(1)
@@ -191,6 +202,23 @@ impl WorkManager {
         state.body = body;
         state.solved = false;
         Ok(state.generation)
+    }
+
+    pub fn validate_execution_version(
+        &self,
+        expected: NativeExecutionVersion,
+    ) -> Result<(), String> {
+        let actual = self
+            .inner
+            .read()
+            .map_err(|_| "work state poisoned".to_string())?
+            .execution_version;
+        if actual != expected {
+            return Err(format!(
+                "mining work execution version mismatch: expected {expected:?}, found {actual:?}"
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -947,6 +975,33 @@ mod tests {
         )
         .unwrap();
         (execution, state)
+    }
+
+    #[test]
+    fn work_manager_defaults_to_v1_execution_version() {
+        let execution = NativeBlockExecutionResultV1 {
+            transactions_root: [1; 32],
+            state_root: [2; 32],
+            receipts_root: [3; 32],
+            execution_root: [4; 32],
+            gas_used: 0,
+            base_fee_burned: 0,
+            producer_priority_fee: 0,
+            receipts: Vec::new(),
+        };
+        let work = WorkManager::new(
+            header(1),
+            0,
+            [0; 32],
+            execution,
+            NativeStateV1::default(),
+        );
+        assert_eq!(work.execution_version(), crate::native_activation_v2::NativeExecutionVersion::V1);
+        work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V1)
+            .unwrap();
+        assert!(work
+            .validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V3)
+            .is_err());
     }
 
     #[test]
