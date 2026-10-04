@@ -56,18 +56,7 @@ Smart contracts have been part of the NIAHCIA design from the beginning.
 
 `ContractCall` and `ContractCreate` are already reserved native transaction actions, and Contract addresses are part of Address V1.
 
-The deterministic native contract runtime is intentionally **not active yet**. Before activation it must define and vector:
-
-- contract code representation;
-- contract creation and address derivation behavior;
-- canonical contract state/storage commitments;
-- create/call/revert/failure semantics;
-- native NIAH value movement;
-- bounded deterministic memory/execution;
-- gas/resource accounting;
-- receipts/events where supported;
-- persistence, restart, and reorg behavior;
-- explicit activation/versioning.
+The deterministic native contract runtime is intentionally **not active yet**, but the inactive V3 development path now implements NVM1 `ContractCreate` and `ContractCall`, contract state/storage commitments, deterministic gas/fee accounting, revert/trap semantics, receipt/execution commitments, atomic block persistence, restart recovery, and competing-branch/reorg persistence. Remaining activation work includes explicit consensus activation/versioning, cross-node devnet validation, and final review/freeze of consensus-visible parameters.
 
 Consensus contracts must not depend on network access, filesystem state, host wall-clock time, external AI workers, or other nondeterministic host services.
 
@@ -134,13 +123,10 @@ Private chat history and Agent memory are local/encrypted by default. Websites s
 
 This repository is the canonical working repository for the reference node plus consolidated protocol, specification, and interoperability-vector material during pre-alpha development.
 
-`niahcia-protocol` remains a synchronized protocol mirror.
-
 Related repositories:
 
 ```text
 niahcia/niahcia              canonical node / chain / protocol working repo
-niahcia/niahcia-protocol     protocol mirror
 niahcia/niahcia-miner        CPU miner
 niahcia/niahcia-compute      AI compute worker
 niahcia/niahcia-explorer     explorer
@@ -153,7 +139,6 @@ niahcia/niahcia.github.io    public project site
 - [Project site](https://niahcia.com/)
 - [Downloads](https://niahcia.com/downloads.html)
 - [GitHub Releases](https://github.com/niahcia/niahcia/releases)
-- [Protocol mirror](https://github.com/niahcia/niahcia-protocol)
 - [Miner](https://github.com/niahcia/niahcia-miner)
 - [Compute worker](https://github.com/niahcia/niahcia-compute)
 - [Explorer](https://github.com/niahcia/niahcia-explorer)
