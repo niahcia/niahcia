@@ -3,6 +3,7 @@ use crate::consensus::{
     devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
     DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
 };
+#[cfg(test)]
 use crate::native_activation_v2::NativeExecutionVersion;
 use crate::native_block_body::NativeBlockBodyV1;
 use crate::native_block_body_v2::NativeBlockBodyV2;
