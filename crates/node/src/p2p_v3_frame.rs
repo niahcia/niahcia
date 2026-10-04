@@ -1,6 +1,8 @@
 use crate::p2p::{GetBlocksV1, HelloV1};
 use crate::p2p_transaction_relay::{GetTxV1, TxInvV1, TxV1};
-use crate::p2p_v3_codec::{decode_blocks_v3, encode_blocks_v3, BlockTransferV3};
+use crate::p2p_v3_codec::{
+    decode_blocks_v3, encode_blocks_v3, BlockTransferV3, NativeBlockBodyTransferV3,
+};
 use crate::work::Hash32;
 use std::io::{Read, Write};
 
