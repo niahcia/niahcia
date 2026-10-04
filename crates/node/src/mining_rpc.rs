@@ -231,6 +231,7 @@ impl WorkManager {
         Ok(state.generation)
     }
 
+    #[allow(dead_code)]
     fn replace_payload(
         &self,
         header: BlockHeaderV1,
@@ -623,6 +624,7 @@ fn submit_work_internal(
     }))
 }
 
+#[allow(dead_code)]
 fn build_inactive_versioned_empty_work_payload(
     state: &StateStore,
     parent_id: Hash32,
@@ -695,6 +697,7 @@ fn build_inactive_versioned_empty_work_payload(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn install_next_native_work_with_activation(
     work: &WorkManager,
     state: &StateStore,
