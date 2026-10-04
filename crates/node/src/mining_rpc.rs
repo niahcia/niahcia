@@ -602,12 +602,13 @@ fn submit_work_internal(
     }))
 }
 
+#[cfg(test)]
 fn build_inactive_versioned_empty_work_payload(
     state: &StateStore,
     parent_id: Hash32,
     parent_height: u64,
     height: u64,
-    fee_recipient: Address20,
+    _fee_recipient: Address20,
     activation: NativeExecutionActivationV3,
     registry: &NativeContractRuntimeRegistryV1,
 ) -> Result<NativeWorkPayload, String> {
