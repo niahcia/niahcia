@@ -1,4 +1,5 @@
 use crate::native_block_body::NativeBlockBodyV1;
+use crate::native_block_body_v2::NativeBlockBodyV2;
 use crate::native_transaction::native_transactions_root_v1;
 use crate::work::{BlockHeaderV1, BLOCK_HEADER_V1_LEN};
 
@@ -6,16 +7,43 @@ pub const MAX_BLOCKS_PER_V3_MESSAGE: usize = 128;
 pub const MAX_BLOCK_BODY_BYTES_V3: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeBlockBodyTransferV3 {
+    V1(NativeBlockBodyV1),
+    V2(NativeBlockBodyV2),
+}
+
+impl NativeBlockBodyTransferV3 {
+    fn version(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+            Self::V2(_) => 2,
+        }
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::V1(body) => body.canonical_bytes(),
+            Self::V2(body) => body.canonical_bytes(),
+        }
+    }
+
+    fn transactions_root(&self) -> Result<[u8; 32], String> {
+        match self {
+            Self::V1(body) => Ok(native_transactions_root_v1(&body.decoded_transactions()?)?),
+            Self::V2(body) => Ok(body.transactions_root()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockTransferV3 {
     pub header: BlockHeaderV1,
-    pub body: NativeBlockBodyV1,
+    pub body: NativeBlockBodyTransferV3,
 }
 
 impl BlockTransferV3 {
     pub fn validate_transaction_commitment(&self) -> Result<(), String> {
-        let transactions = self.body.decoded_transactions()?;
-        let root = native_transactions_root_v1(&transactions)?;
-        if root != self.header.transactions_root {
+        if self.body.transactions_root()? != self.header.transactions_root {
             return Err("P2P V3 block body transactions root does not match header".into());
         }
         Ok(())
@@ -38,6 +66,7 @@ pub fn encode_blocks_v3(blocks: &[BlockTransferV3]) -> Result<Vec<u8>, String> {
         }
 
         out.extend_from_slice(&block.header.canonical_bytes());
+        out.push(block.body.version());
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
         out.extend_from_slice(&body);
     }
@@ -55,12 +84,18 @@ pub fn decode_blocks_v3(bytes: &[u8]) -> Result<Vec<BlockTransferV3>, String> {
     let mut blocks = Vec::with_capacity(count);
     for _ in 0..count {
         let header = BlockHeaderV1::from_canonical_bytes(cursor.bytes(BLOCK_HEADER_V1_LEN)?)?;
+        let body_version = cursor.u8()?;
         let body_len = cursor.u32()? as usize;
         if body_len > MAX_BLOCK_BODY_BYTES_V3 {
             return Err("P2P V3 native block body exceeds byte limit".into());
         }
 
-        let body = NativeBlockBodyV1::from_canonical_bytes(cursor.bytes(body_len)?)?;
+        let body_bytes = cursor.bytes(body_len)?;
+        let body = match body_version {
+            1 => NativeBlockBodyTransferV3::V1(NativeBlockBodyV1::from_canonical_bytes(body_bytes)?),
+            2 => NativeBlockBodyTransferV3::V2(NativeBlockBodyV2::from_canonical_bytes(body_bytes)?),
+            other => return Err(format!("unsupported P2P V3 native block body version {other}")),
+        };
         let transfer = BlockTransferV3 { header, body };
         transfer.validate_transaction_commitment()?;
         blocks.push(transfer);
@@ -94,6 +129,10 @@ impl<'a> Cursor<'a> {
         let out = &self.bytes[self.offset..end];
         self.offset = end;
         Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.bytes(1)?[0])
     }
 
     fn u16(&mut self) -> Result<u16, String> {
@@ -132,7 +171,7 @@ mod tests {
                 nonce: marker as u64,
                 extra_nonce: marker as u64 + 1,
             },
-            body,
+            body: NativeBlockBodyTransferV3::V1(body),
         }
     }
 
@@ -142,6 +181,28 @@ mod tests {
         let encoded = encode_blocks_v3(&blocks).unwrap();
         let decoded = decode_blocks_v3(&encoded).unwrap();
         assert_eq!(decoded, blocks);
+    }
+
+    #[test]
+    fn v3_block_batch_round_trips_v2_body() {
+        let body = NativeBlockBodyV2::empty();
+        let transfer = BlockTransferV3 {
+            header: BlockHeaderV1 {
+                version: 1,
+                parent_hash: [3; 32],
+                height: 3,
+                timestamp: 1_800_000_003,
+                transactions_root: body.transactions_root(),
+                execution_root: [4; 32],
+                target: [0xff; 32],
+                nonce: 3,
+                extra_nonce: 4,
+            },
+            body: NativeBlockBodyTransferV3::V2(body),
+        };
+        let encoded = encode_blocks_v3(std::slice::from_ref(&transfer)).unwrap();
+        let decoded = decode_blocks_v3(&encoded).unwrap();
+        assert_eq!(decoded, vec![transfer]);
     }
 
     #[test]
