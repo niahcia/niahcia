@@ -1520,13 +1520,7 @@ mod tests {
             .unwrap();
 
         let v3_payload = build_inactive_versioned_empty_work_payload(
-            &store,
-            v2_id,
-            1,
-            2,
-            [0_u8; 20],
-            activation,
-            &registry,
+            &store, v2_id, 1, 2, [0_u8; 20], activation, &registry,
         )
         .unwrap();
         let NativeWorkPayload::V3 {
@@ -1589,5 +1583,4 @@ mod tests {
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
-
 }
