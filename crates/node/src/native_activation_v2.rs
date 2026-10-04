@@ -364,7 +364,9 @@ mod tests {
             v3_activation_height: 200,
         };
         let parent = NativeStateV2::default();
-        let migrated = activation.migrate_v2_parent_state(199, parent.clone()).unwrap();
+        let migrated = activation
+            .migrate_v2_parent_state(199, parent.clone())
+            .unwrap();
         assert_eq!(migrated.base(), &parent);
         assert_eq!(migrated.contract_count(), 0);
         assert!(activation
@@ -372,5 +374,4 @@ mod tests {
             .unwrap_err()
             .contains("requires parent height 199"));
     }
-
 }
