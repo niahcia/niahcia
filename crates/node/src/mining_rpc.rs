@@ -35,6 +35,7 @@ pub struct WorkManager {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum NativeWorkPayload {
     V1 {
         execution: NativeBlockExecutionResultV1,
@@ -54,6 +55,7 @@ enum NativeWorkPayload {
 }
 
 impl NativeWorkPayload {
+    #[cfg(test)]
     fn execution_version(&self) -> NativeExecutionVersion {
         match self {
             Self::V1 { .. } => NativeExecutionVersion::V1,
