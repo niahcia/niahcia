@@ -1,8 +1,6 @@
 use crate::p2p::{GetBlocksV1, HelloV1};
 use crate::p2p_transaction_relay::{GetTxV1, TxInvV1, TxV1};
-use crate::p2p_v3_codec::{
-    decode_blocks_v3, encode_blocks_v3, BlockTransferV3, NativeBlockBodyTransferV3,
-};
+use crate::p2p_v3_codec::{decode_blocks_v3, encode_blocks_v3, BlockTransferV3};
 use crate::work::Hash32;
 use std::io::{Read, Write};
 
@@ -220,6 +218,7 @@ fn io_error(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use crate::native_block_body::NativeBlockBodyV1;
+    use crate::p2p_v3_codec::NativeBlockBodyTransferV3;
     use crate::native_transaction::native_transactions_root_v1;
     use crate::work::BlockHeaderV1;
 
