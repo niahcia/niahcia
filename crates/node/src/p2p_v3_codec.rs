@@ -92,9 +92,17 @@ pub fn decode_blocks_v3(bytes: &[u8]) -> Result<Vec<BlockTransferV3>, String> {
 
         let body_bytes = cursor.bytes(body_len)?;
         let body = match body_version {
-            1 => NativeBlockBodyTransferV3::V1(NativeBlockBodyV1::from_canonical_bytes(body_bytes)?),
-            2 => NativeBlockBodyTransferV3::V2(NativeBlockBodyV2::from_canonical_bytes(body_bytes)?),
-            other => return Err(format!("unsupported P2P V3 native block body version {other}")),
+            1 => {
+                NativeBlockBodyTransferV3::V1(NativeBlockBodyV1::from_canonical_bytes(body_bytes)?)
+            }
+            2 => {
+                NativeBlockBodyTransferV3::V2(NativeBlockBodyV2::from_canonical_bytes(body_bytes)?)
+            }
+            other => {
+                return Err(format!(
+                    "unsupported P2P V3 native block body version {other}"
+                ))
+            }
         };
         let transfer = BlockTransferV3 { header, body };
         transfer.validate_transaction_commitment()?;
