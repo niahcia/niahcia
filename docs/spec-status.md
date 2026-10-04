@@ -1,6 +1,6 @@
 # NIAHCIA Specification Status Audit
 
-Last reviewed: 2026-10-03
+Last reviewed: 2026-10-04
 
 This file is a living audit of protocol status. Implementation alone does not make behavior normative.
 
@@ -36,14 +36,14 @@ This file is a living audit of protocol status. Implementation alone does not ma
 | NativeState V1 | IMPLEMENTED + VECTORED | Active accounts-only state/snapshot path. |
 | NativeBlockBody V1 | IMPLEMENTED | Active canonical non-empty block-body path. |
 | NativeBlockBody V2 | IMPLEMENTED (DEV) + INACTIVE | Versioned canonical body for ordered V1/V2 signed transactions; not admitted to active runtime. |
-| Native Execution Commitment V3 | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV3/ExecutionResultV3 extends commitments across transfers, compute, ContractCreate, and ContractCall with post-state roots and aggregate gas/fee accounting. V3 receipt/result canonical bytes and commitments are locked; inactive V3 body/execution/state persistence is implemented. |
+| Native Execution Commitment V3 | IMPLEMENTED (DEV) + VECTORED + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV3/ExecutionResultV3 covers transfers, compute, ContractCreate, and ContractCall. Receipt commitments, receipts root, execution root, canonical execution bytes, atomic V3 persistence, restart recovery, and divergent contract-state reorg restoration are implemented and tested. |
 | Native Execution Commitment V2 | IMPLEMENTED (DEV) + VECTOR LOCKED + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV2/ExecutionResultV2 commits transaction schema/action, per-transaction post-state roots, aggregate state/gas/fees. `test-vectors/native-execution-v2.json` locks canonical receipt/result bytes and commitments; activation remains open. |
 | Native Compute Gas V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Open=3,000, Settle=5,000, Refund=2,000 intrinsic gas; transfer-shaped base-fee burn / producer-priority accounting; inactive V2 only. |
 | NVM1 Code Format V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Runtime ID 1 candidate with deterministic VM execution, bounded stack/memory/storage operations, gas schedule, STOP/RETURN/REVERT/trap semantics; not active consensus. |
 | Native Contract Runtime Registry V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Deterministic runtime-ID registry with inclusive activation, exclusive retirement, per-runtime payload bounds, and block/transaction execution enforcement. NVM1 runtime ID 1 is the current inactive candidate. |
 | ContractCreate Payload V1 | IMPLEMENTED (DEV) + VECTOR LOCKED + CANDIDATE + INACTIVE | NCE/1 runtime_id/code/init_data boundary; runtime_id zero reserved; code/init each capped at 65,536 bytes; executed by the inactive NVM1 ContractCreate path. |
 | Native Contract State V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Contract balance, opaque runtime/code bytes, fixed 32-byte key/value storage, contracts root, and NativeStateV3 successor snapshot/root are defined and vectored without selecting a VM. |
-| Native Execution V2 activation boundary | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + REVIEW REQUIRED + INACTIVE | Explicit V1-before / V2-at-and-after height rule plus deterministic V1 -> V2 parent-state migration helper. Locked fixture covers H-1/H/H+1, rejection, restart, and reorg classification. No real activation height is assigned or wired into active runtime. |
+| Native Execution V2/V3 activation boundary | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + REVIEW REQUIRED + INACTIVE | Explicit V1/V2/V3 height selector with deterministic V1 -> V2 and V2 -> V3 boundary migration. Optional paired NodeConfig heights are validated (`0 < V2 < V3`) and disabled by default. Activation-aware mining construction/installation is tested; active mempool/P2P refresh remains V1-only. |
 | Native smart-contract runtime | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | NVM1 ContractCreate/ContractCall, NativeStateV3, runtime activation, gas/fee accounting, revert/trap semantics, atomic V3 block execution, compute+contract coexistence, and V3 receipt/execution commitments are implemented. Atomic V3 persistence, restart recovery, and competing-branch/reorg persistence are implemented and tested. Consensus activation and cross-node devnet validation remain. |
 | NativeState V2 | IMPLEMENTED (DEV) + VECTORED + INACTIVE | Accounts + ComputeChannel state; no activation height set. |
 | NativeTransaction V2 | IMPLEMENTED (DEV) + VECTORED + INACTIVE | Explicit ComputeChannel actions; not admitted to active mempool/P2P/mining. |
@@ -72,10 +72,10 @@ Persistence/restart/reorg proof is now implemented for transition-derived V2 sta
 
 Still required before activation:
 
-1. explicit fee/gas schedule;
-2. a concrete network activation height;
-3. activation/migration interoperability vectors covering H - 1, H, H + 1 and reorgs across H;
-4. active-runtime wiring of the V2 boundary without changing locked V1 behavior.
+1. review/finalize the candidate fee/gas schedule and activation economics;
+2. make P2P ingestion/export derive expected execution version from the same local activation schedule;
+3. replace the V1-only mempool/relay boundary with versioned transaction admission sufficient for V2 compute and V3 contracts;
+4. complete cross-node V1 -> V2 -> V3 devnet validation before assigning concrete network activation heights.
 
 ## AI / Agent architecture
 
@@ -129,10 +129,10 @@ The active reference node is native-execution only.
 
 ## Highest-priority open protocol work
 
-1. Add restart/reorg coverage using actual divergent contract state, not only empty V3 blocks.
-2. Complete cross-node devnet validation for V3 contract execution, commitments, persistence, and reorg behavior.
-3. Define and test the explicit consensus activation boundary for the V3 native smart-contract path without changing locked V1/V2 behavior.
-4. Review the candidate compute gas/fee schedule together with V2 activation economics before selecting a concrete activation height.
+1. Thread one validated V1/V2/V3 activation schedule through mining RPC and P2P template refresh/validation; derive execution version locally from height.
+2. Implement versioned mempool/relay admission for V2 compute and V3 contract transactions without weakening V1 canonicality.
+3. Complete cross-node devnet validation for V1 -> V2 -> V3 execution, commitments, persistence, restart, and reorg convergence.
+4. Review the candidate compute gas/fee schedule together with V2 activation economics before selecting concrete activation heights.
 5. Resolve stock miner/pool RandomX interoperability.
 6. Resolve difficulty/timestamp hardening.
 7. Finalize public-testnet genesis/network/monetary parameters.
