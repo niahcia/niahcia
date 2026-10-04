@@ -2,7 +2,7 @@
 
 **Purpose:** First document a new development session should read. It summarizes current NIAHCIA state, decisions to preserve, unresolved work, and safest next tasks.
 
-**Maintenance rule:** Update this file whenever priorities, blockers, locked decisions, or major implementation state change. Keep `docs/spec-status.md` synchronized as the detailed inventory.
+**Maintenance rule:** Update this file whenever priorities, blockers, locked decisions, or major implementation state change. Keep `docs/spec-status.md` synchronized as the detailed inventory. `docs/CURRENT-WORK.md` is the authoritative handoff for current implementation state and next work.
 
 ## Resume sequence
 
@@ -11,7 +11,7 @@
 3. Read `docs/why-niahcia.md`.
 4. Read relevant specifications before changing behavior.
 5. Inspect current `niahcia/niahcia` implementation and GitHub failures/issues.
-6. Keep implementation docs and `niahcia-protocol` synchronized.
+6. Treat this repository as the single canonical implementation/protocol workspace.
 7. Never silently replace locked interoperability behavior; version changes and vectors together.
 
 ## Core architecture
@@ -92,12 +92,7 @@ Central rules:
 - standard decentralized inference may still require temporary plaintext access inside the authorized execution environment; encryption at rest/in transit does not imply that a conventional worker is cryptographically blind to the prompt;
 - privacy execution profiles may later distinguish standard private execution, confidential/attested execution, and future MPC/FHE-style execution without changing the chat-session model.
 
-Current state: **specified, not implemented.** Do not expect current node/devnet tests to exercise wallet-chat identity, encrypted conversation storage, device key wrapping, portal delegation, or chat payment flows yet. Treat any implementation work here as a new feature requiring explicit tests/vectors and synchronization across protocol/implementation documentation.
-
-Relevant commits:
-
-- `niahcia/niahcia`: `1fcaf08be040a2af93a1a513f44be949561669ca`
-- `niahcia/niahcia-protocol`: `9f392a9fcf7c7e3700ec6ad89dbdf6c37b207638`
+Current state: **specified, not implemented.** Do not expect current node/devnet tests to exercise wallet-chat identity, encrypted conversation storage, device key wrapping, portal delegation, or chat payment flows yet. Treat any implementation work here as a new feature requiring explicit tests/vectors and synchronized documentation within this repository.
 
 ## Cryptographic authority candidates
 
@@ -331,11 +326,11 @@ Relevant new specs include:
 
 ## Documentation model
 
-- `niahcia/niahcia` — canonical working repository for implementation plus consolidated protocol/spec/test-vector material.
-- `niahcia/niahcia-protocol` — synchronized protocol mirror retained during the repository transition; do not let it contradict the canonical repository.
-- `niahcia/niahcia-compute` — replaceable GPU/accelerator execution-host behavior and operational documentation.
+- `niahcia/niahcia` is the single canonical repository for implementation, protocol specifications, interoperability vectors, architecture, and current work.
+- `docs/CURRENT-WORK.md` is the authoritative development handoff/status document and must be updated whenever priorities, blockers, locked decisions, or major implementation state change.
+- `niahcia/niahcia-compute` remains a separate operational repository for replaceable GPU/accelerator execution-host behavior.
 
-Protocol-visible implementation changes update the canonical repository and any retained mirror that carries the same protocol material.
+Protocol-visible implementation changes update the implementation, affected specifications/status, vectors where required, and this handoff in the same repository.
 
 ## Repository cleanup audit
 
