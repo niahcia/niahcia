@@ -3,21 +3,25 @@ use crate::consensus::{
     devnet_next_target, randomx_seed, randomx_seed_height, validate_timestamp,
     DEVNET_GENESIS_TARGET, MEDIAN_TIME_WINDOW,
 };
+#[cfg(test)]
 use crate::native_activation_v2::{NativeExecutionActivationV3, NativeExecutionVersion};
 use crate::native_block_body::NativeBlockBodyV1;
 use crate::native_block_body_v2::NativeBlockBodyV2;
+#[cfg(test)]
 use crate::native_block_execution_v2::execute_inactive_versioned_block_v2;
+#[cfg(test)]
 use crate::native_block_execution_v3::execute_inactive_versioned_block_v3;
+#[cfg(test)]
 use crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1;
 use crate::native_execution::{
     execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
 };
-use crate::native_execution_commitment_v2::{
-    build_inactive_execution_result_v2, NativeBlockExecutionResultV2,
-};
-use crate::native_execution_commitment_v3::{
-    build_inactive_execution_result_v3, NativeBlockExecutionResultV3,
-};
+#[cfg(test)]
+use crate::native_execution_commitment_v2::build_inactive_execution_result_v2;
+use crate::native_execution_commitment_v2::NativeBlockExecutionResultV2;
+#[cfg(test)]
+use crate::native_execution_commitment_v3::build_inactive_execution_result_v3;
+use crate::native_execution_commitment_v3::NativeBlockExecutionResultV3;
 use crate::native_rpc::{mempool_size, submit_raw_transaction_hex, SharedNativeMempoolV1};
 use crate::native_state_v2::NativeStateV2;
 use crate::native_state_v3::NativeStateV3;
@@ -603,6 +607,7 @@ fn submit_work_internal(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn build_inactive_versioned_empty_work_payload(
     state: &StateStore,
     parent_id: Hash32,
