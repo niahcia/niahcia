@@ -11,7 +11,7 @@ use crate::p2p_transaction_relay::{
     admit_relay_transactions, inventory_for_mempool, missing_from_inventory,
     transactions_for_request, GetTxV1, TxInvV1, TxV1,
 };
-use crate::p2p_v3_codec::BlockTransferV3;
+use crate::p2p_v3_codec::{BlockTransferV3, NativeBlockBodyTransferV3};
 use crate::p2p_v3_frame::{read_message_v3, write_message_v3, MessageV3};
 use crate::state::{ChainReorg, StateStore};
 use crate::work::{Address20, Hash32};
@@ -346,6 +346,12 @@ fn ingest_blocks_v3(
 ) -> Result<(), String> {
     for transfer in blocks {
         transfer.validate_transaction_commitment()?;
+        let body = match &transfer.body {
+            NativeBlockBodyTransferV3::V1(body) => body,
+            NativeBlockBodyTransferV3::V2(_) => {
+                return Err("P2P V3 versioned native block body received before execution activation".into())
+            }
+        };
 
         let seed_height = randomx_seed_height(transfer.header.height);
         let seed_block_id = if transfer.header.height == 0 {
@@ -367,19 +373,17 @@ fn ingest_blocks_v3(
                 .ok_or_else(|| "candidate parent is missing native state snapshot".to_string())?
         };
 
-        let transactions = transfer.body.decoded_transactions()?;
+        let transactions = body.decoded_transactions()?;
         let execution = execute_block_v1(
             &mut native_state,
             &transactions,
             AddressNetwork::Devnet,
             NativeExecutionContextV1 {
                 base_fee_per_gas: 0,
-                cpu_producer: transfer.body.producer_fee_recipient,
+                cpu_producer: body.producer_fee_recipient,
             },
         )?;
-        transfer
-            .body
-            .validate_fee_recipient_canonicality(execution.producer_priority_fee)?;
+        body.validate_fee_recipient_canonicality(execution.producer_priority_fee)?;
 
         if execution.transactions_root != transfer.header.transactions_root {
             return Err("P2P V3 execution transactions root does not match header".into());
@@ -390,7 +394,7 @@ fn ingest_blocks_v3(
 
         let outcome = state.insert_native_block_with_body_and_execution_outcome(
             transfer.header,
-            &transfer.body,
+            body,
             &execution,
             &native_state,
         )?;
@@ -444,7 +448,7 @@ fn canonical_transfer_range_v3(
 
             let transfer = BlockTransferV3 {
                 header: block.header.clone(),
-                body,
+                body: NativeBlockBodyTransferV3::V1(body),
             };
             transfer.validate_transaction_commitment()?;
             Ok(transfer)
