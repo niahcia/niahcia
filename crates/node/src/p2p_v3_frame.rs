@@ -238,7 +238,7 @@ mod tests {
                 nonce: 9,
                 extra_nonce: 10,
             },
-            body,
+            body: NativeBlockBodyTransferV3::V1(body),
         }
     }
 
