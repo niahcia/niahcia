@@ -164,17 +164,20 @@ impl WorkManager {
         let mut header = state.header.clone();
         header.nonce = nonce;
         header.extra_nonce = extra_nonce;
+        let (execution, native_state, body) = match &state.payload {
+            NativeWorkPayload::V1 {
+                execution,
+                native_state,
+                body,
+            } => (execution.clone(), native_state.clone(), body.clone()),
+            _ => return Err("versioned mining payload submission is not active yet".into()),
+        };
         Ok((
             header,
             state.randomx_seed,
-            match &state.payload {
-                NativeWorkPayload::V1 {
-                    execution,
-                    native_state,
-                    body,
-                } => (execution.clone(), native_state.clone(), body.clone()),
-                _ => return Err("versioned mining payload submission is not active yet".into()),
-            },
+            execution,
+            native_state,
+            body,
         ))
     }
 
