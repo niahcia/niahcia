@@ -2319,9 +2319,7 @@ mod tests {
     #[test]
     fn inactive_v3_contract_state_survives_reorg_and_restart() {
         use crate::address::{AddressNetwork, NiahciaAddressV1};
-        use crate::native_block_body_v2::{
-            NativeBlockBodyV2, VersionedSignedNativeTransaction,
-        };
+        use crate::native_block_body_v2::{NativeBlockBodyV2, VersionedSignedNativeTransaction};
         use crate::native_block_execution_v3::execute_inactive_versioned_block_v3;
         use crate::native_contract_payload_v1::ContractCreatePayloadV1;
         use crate::native_contract_runtime_registry_v1::{
@@ -2434,7 +2432,10 @@ mod tests {
         header_a.execution_root = execution_a.execution_root;
         let outcome_a = store
             .insert_inactive_native_v3_block_with_body_and_execution_outcome(
-                header_a, &body_a, &execution_a, &state_a,
+                header_a,
+                &body_a,
+                &execution_a,
+                &state_a,
             )
             .unwrap();
         let a_id = outcome_a.block.block_id();
@@ -2475,7 +2476,10 @@ mod tests {
         header_b.execution_root = execution_b.execution_root;
         let outcome_b = store
             .insert_inactive_native_v3_block_with_body_and_execution_outcome(
-                header_b, &body_b, &execution_b, &state_b,
+                header_b,
+                &body_b,
+                &execution_b,
+                &state_b,
             )
             .unwrap();
         let b_id = outcome_b.block.block_id();
