@@ -1690,14 +1690,8 @@ mod tests {
             crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1::default();
         let work = test_work_manager(&genesis);
 
-        install_next_native_work_with_activation(
-            &work,
-            &store,
-            [0_u8; 20],
-            activation,
-            &registry,
-        )
-        .unwrap();
+        install_next_native_work_with_activation(&work, &store, [0_u8; 20], activation, &registry)
+            .unwrap();
         work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V2)
             .unwrap();
         let (generation, v2_header, _, _) = work.current();
@@ -1724,14 +1718,8 @@ mod tests {
             )
             .unwrap();
 
-        install_next_native_work_with_activation(
-            &work,
-            &store,
-            [0_u8; 20],
-            activation,
-            &registry,
-        )
-        .unwrap();
+        install_next_native_work_with_activation(&work, &store, [0_u8; 20], activation, &registry)
+            .unwrap();
         work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V3)
             .unwrap();
         let (generation, v3_header, _, _) = work.current();
@@ -1754,5 +1742,4 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_file(path);
     }
-
 }
