@@ -5,10 +5,15 @@ use crate::consensus::{
 };
 use crate::native_activation_v2::NativeExecutionVersion;
 use crate::native_block_body::NativeBlockBodyV1;
+use crate::native_block_body_v2::NativeBlockBodyV2;
 use crate::native_execution::{
     execute_block_v1, NativeBlockExecutionResultV1, NativeExecutionContextV1, NativeStateV1,
 };
+use crate::native_execution_commitment_v2::NativeBlockExecutionResultV2;
+use crate::native_execution_commitment_v3::NativeBlockExecutionResultV3;
 use crate::native_rpc::{mempool_size, submit_raw_transaction_hex, SharedNativeMempoolV1};
+use crate::native_state_v2::NativeStateV2;
+use crate::native_state_v3::NativeStateV3;
 use crate::pow::RandomXVerifier;
 use crate::state::StateStore;
 use crate::work::{Address20, BlockHeaderV1, Hash32};
@@ -30,15 +35,41 @@ pub struct WorkManager {
 }
 
 #[derive(Clone)]
+enum NativeWorkPayload {
+    V1 {
+        execution: NativeBlockExecutionResultV1,
+        native_state: NativeStateV1,
+        body: NativeBlockBodyV1,
+    },
+    V2 {
+        execution: NativeBlockExecutionResultV2,
+        native_state: NativeStateV2,
+        body: NativeBlockBodyV2,
+    },
+    V3 {
+        execution: NativeBlockExecutionResultV3,
+        native_state: NativeStateV3,
+        body: NativeBlockBodyV2,
+    },
+}
+
+impl NativeWorkPayload {
+    fn execution_version(&self) -> NativeExecutionVersion {
+        match self {
+            Self::V1 { .. } => NativeExecutionVersion::V1,
+            Self::V2 { .. } => NativeExecutionVersion::V2,
+            Self::V3 { .. } => NativeExecutionVersion::V3,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct WorkState {
     generation: u64,
-    execution_version: NativeExecutionVersion,
     header: BlockHeaderV1,
     randomx_seed_height: u64,
     randomx_seed: [u8; 32],
-    execution: NativeBlockExecutionResultV1,
-    native_state: NativeStateV1,
-    body: NativeBlockBodyV1,
+    payload: NativeWorkPayload,
     solved: bool,
 }
 
@@ -71,13 +102,14 @@ impl WorkManager {
         Self {
             inner: Arc::new(RwLock::new(WorkState {
                 generation: 0,
-                execution_version: NativeExecutionVersion::V1,
                 header,
                 randomx_seed_height,
                 randomx_seed,
-                execution,
-                native_state,
-                body,
+                payload: NativeWorkPayload::V1 {
+                    execution,
+                    native_state,
+                    body,
+                },
                 solved: false,
             })),
         }
@@ -88,7 +120,8 @@ impl WorkManager {
         self.inner
             .read()
             .expect("work state poisoned")
-            .execution_version
+            .payload
+            .execution_version()
     }
 
     pub fn current(&self) -> (u64, BlockHeaderV1, u64, [u8; 32]) {
@@ -134,9 +167,14 @@ impl WorkManager {
         Ok((
             header,
             state.randomx_seed,
-            state.execution.clone(),
-            state.native_state.clone(),
-            state.body.clone(),
+            match &state.payload {
+                NativeWorkPayload::V1 {
+                    execution,
+                    native_state,
+                    body,
+                } => (execution.clone(), native_state.clone(), body.clone()),
+                _ => return Err("versioned mining payload submission is not active yet".into()),
+            },
         ))
     }
 
@@ -190,7 +228,6 @@ impl WorkManager {
             .inner
             .write()
             .map_err(|_| "work state poisoned".to_string())?;
-        state.execution_version = NativeExecutionVersion::V1;
         state.generation = state
             .generation
             .checked_add(1)
@@ -198,9 +235,11 @@ impl WorkManager {
         state.header = header;
         state.randomx_seed_height = randomx_seed_height;
         state.randomx_seed = randomx_seed;
-        state.execution = execution;
-        state.native_state = native_state;
-        state.body = body;
+        state.payload = NativeWorkPayload::V1 {
+            execution,
+            native_state,
+            body,
+        };
         state.solved = false;
         Ok(state.generation)
     }
@@ -214,7 +253,8 @@ impl WorkManager {
             .inner
             .read()
             .map_err(|_| "work state poisoned".to_string())?
-            .execution_version;
+            .payload
+            .execution_version();
         if actual != expected {
             return Err(format!(
                 "mining work execution version mismatch: expected {expected:?}, found {actual:?}"
