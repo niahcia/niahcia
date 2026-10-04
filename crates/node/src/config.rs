@@ -1,4 +1,5 @@
 use crate::address::{AddressKind, AddressNetwork, NiahciaAddressV1};
+use crate::native_activation_v2::NativeExecutionActivationV3;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -84,6 +85,21 @@ impl NodeConfig {
         cfg.validate()?;
         cfg.normalize_fee_recipient()?;
         Ok(cfg)
+    }
+
+    pub fn native_execution_activation(&self) -> Option<NativeExecutionActivationV3> {
+        match (
+            self.native_v2_activation_height,
+            self.native_v3_activation_height,
+        ) {
+            (Some(v2_activation_height), Some(v3_activation_height)) => {
+                Some(NativeExecutionActivationV3 {
+                    v2_activation_height,
+                    v3_activation_height,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn native_fee_recipient(&self) -> Result<Option<NiahciaAddressV1>, String> {
