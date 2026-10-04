@@ -124,6 +124,15 @@ fn main() -> ExitCode {
         }
     };
 
+    let native_execution_activation = config.native_execution_activation();
+    if let Some(activation) = native_execution_activation {
+        info!(
+            v2_activation_height = activation.v2_activation_height,
+            v3_activation_height = activation.v3_activation_height,
+            "native execution activation schedule configured"
+        );
+    }
+
     let state_path = config.data_dir.join("state.redb");
     let state = match StateStore::open(&state_path) {
         Ok(state) => Arc::new(state),
