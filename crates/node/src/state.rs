@@ -2317,6 +2317,204 @@ mod tests {
     }
 
     #[test]
+    fn inactive_v3_contract_state_survives_reorg_and_restart() {
+        use crate::address::{AddressNetwork, NiahciaAddressV1};
+        use crate::native_block_body_v2::{
+            NativeBlockBodyV2, VersionedSignedNativeTransaction,
+        };
+        use crate::native_block_execution_v3::execute_inactive_versioned_block_v3;
+        use crate::native_contract_payload_v1::ContractCreatePayloadV1;
+        use crate::native_contract_runtime_registry_v1::{
+            ContractRuntimeDescriptorV1, NativeContractRuntimeRegistryV1,
+        };
+        use crate::native_contract_vm_v1::{NVM1_CODE_FORMAT_VERSION, NVM1_RUNTIME_ID};
+        use crate::native_execution_commitment_v3::build_inactive_execution_result_v3;
+        use crate::native_state_v3::NativeStateV3;
+        use crate::native_transaction::{DEVNET_CHAIN_ID, DEVNET_NETWORK_ID};
+        use crate::native_transaction_v2::{NativeActionV2, NativeTransactionBodyV2};
+
+        fn stop_module() -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend_from_slice(b"NVM1");
+            code.extend_from_slice(&1u16.to_be_bytes());
+            code.extend_from_slice(&0u16.to_be_bytes());
+            code.extend_from_slice(&1u32.to_be_bytes());
+            code.extend_from_slice(&1u16.to_be_bytes());
+            code.extend_from_slice(&0u16.to_be_bytes());
+            code.push(0x00);
+            code
+        }
+
+        let path = temp_state_path("inactive-v3-contract-reorg");
+        let key = k256::ecdsa::SigningKey::from_slice(&[0x63; 32]).unwrap();
+        let (base, sender) = funded_native_state_v2(&key, 100_000);
+        let genesis_state = NativeStateV3::from_v2(base);
+        let registry = NativeContractRuntimeRegistryV1::new([ContractRuntimeDescriptorV1 {
+            runtime_id: NVM1_RUNTIME_ID,
+            code_format_version: NVM1_CODE_FORMAT_VERSION,
+            activation_height: 1,
+            retirement_height: None,
+            max_code_bytes: 65_536,
+            max_init_data_bytes: 65_536,
+        }])
+        .unwrap();
+        let create_payload = ContractCreatePayloadV1 {
+            runtime_id: NVM1_RUNTIME_ID,
+            code: stop_module(),
+            init_data: Vec::new(),
+        };
+        let contract_id = NiahciaAddressV1::contract_from_creator(
+            AddressNetwork::Devnet,
+            DEVNET_CHAIN_ID,
+            sender,
+            0,
+        )
+        .payload;
+
+        let store = StateStore::open(&path).unwrap();
+        let genesis_body = NativeBlockBodyV2::empty();
+        let mut committed_genesis = genesis_state.clone();
+        let genesis_transition = execute_inactive_versioned_block_v3(
+            &mut committed_genesis,
+            &registry,
+            &genesis_body,
+            AddressNetwork::Devnet,
+            0,
+            2,
+        )
+        .unwrap();
+        let genesis_execution =
+            build_inactive_execution_result_v3(&genesis_body, &genesis_transition).unwrap();
+        let mut genesis_header = header([0_u8; 32], 0, [0xff; 32], 0x6a);
+        genesis_header.transactions_root = genesis_execution.transactions_root;
+        genesis_header.execution_root = genesis_execution.execution_root;
+        let genesis = store
+            .insert_inactive_native_v3_block_with_body_and_execution_outcome(
+                genesis_header,
+                &genesis_body,
+                &genesis_execution,
+                &committed_genesis,
+            )
+            .unwrap();
+        let genesis_id = genesis.block.block_id();
+
+        let create_a = sign_v2_for_state_test(
+            &key,
+            NativeTransactionBodyV2 {
+                network_id: DEVNET_NETWORK_ID,
+                chain_id: DEVNET_CHAIN_ID,
+                nonce: 0,
+                action: NativeActionV2::ContractCreate,
+                target_payload: Vec::new(),
+                value: 100,
+                gas_limit: 10,
+                max_fee_per_gas: 5,
+                max_priority_fee_per_gas: 2,
+                data: create_payload.canonical_bytes().unwrap(),
+            },
+        );
+        let body_a = NativeBlockBodyV2::from_versioned_transactions(
+            [0x99; 20],
+            &[VersionedSignedNativeTransaction::V2(create_a)],
+        )
+        .unwrap();
+        let mut state_a = committed_genesis.clone();
+        let transition_a = execute_inactive_versioned_block_v3(
+            &mut state_a,
+            &registry,
+            &body_a,
+            AddressNetwork::Devnet,
+            1,
+            2,
+        )
+        .unwrap();
+        let execution_a = build_inactive_execution_result_v3(&body_a, &transition_a).unwrap();
+        let mut header_a = header(genesis_id, 1, [0xff; 32], 0x6b);
+        header_a.transactions_root = execution_a.transactions_root;
+        header_a.execution_root = execution_a.execution_root;
+        let outcome_a = store
+            .insert_inactive_native_v3_block_with_body_and_execution_outcome(
+                header_a, &body_a, &execution_a, &state_a,
+            )
+            .unwrap();
+        let a_id = outcome_a.block.block_id();
+
+        let create_b = sign_v2_for_state_test(
+            &key,
+            NativeTransactionBodyV2 {
+                network_id: DEVNET_NETWORK_ID,
+                chain_id: DEVNET_CHAIN_ID,
+                nonce: 0,
+                action: NativeActionV2::ContractCreate,
+                target_payload: Vec::new(),
+                value: 250,
+                gas_limit: 10,
+                max_fee_per_gas: 5,
+                max_priority_fee_per_gas: 2,
+                data: create_payload.canonical_bytes().unwrap(),
+            },
+        );
+        let body_b = NativeBlockBodyV2::from_versioned_transactions(
+            [0x99; 20],
+            &[VersionedSignedNativeTransaction::V2(create_b)],
+        )
+        .unwrap();
+        let mut state_b = committed_genesis.clone();
+        let transition_b = execute_inactive_versioned_block_v3(
+            &mut state_b,
+            &registry,
+            &body_b,
+            AddressNetwork::Devnet,
+            1,
+            2,
+        )
+        .unwrap();
+        let execution_b = build_inactive_execution_result_v3(&body_b, &transition_b).unwrap();
+        let mut header_b = header(genesis_id, 1, [0x7f; 32], 0x6c);
+        header_b.transactions_root = execution_b.transactions_root;
+        header_b.execution_root = execution_b.execution_root;
+        let outcome_b = store
+            .insert_inactive_native_v3_block_with_body_and_execution_outcome(
+                header_b, &body_b, &execution_b, &state_b,
+            )
+            .unwrap();
+        let b_id = outcome_b.block.block_id();
+
+        assert_eq!(state_a.contract(contract_id).unwrap().balance, 100);
+        assert_eq!(state_b.contract(contract_id).unwrap().balance, 250);
+        assert_ne!(state_a.state_root().unwrap(), state_b.state_root().unwrap());
+        let reorg = outcome_b.reorg.expect("harder contract branch must win");
+        assert_eq!(reorg.old_head, a_id);
+        assert_eq!(reorg.new_head, b_id);
+        assert_eq!(store.best_chain_head().unwrap().unwrap().block_id(), b_id);
+
+        drop(store);
+        let reopened = StateStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.best_chain_head().unwrap().unwrap().block_id(),
+            b_id
+        );
+        let restored_a = reopened
+            .inactive_native_state_v3_snapshot(a_id)
+            .unwrap()
+            .unwrap();
+        let restored_b = reopened
+            .inactive_native_state_v3_snapshot(b_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored_a.contract(contract_id).unwrap().balance, 100);
+        assert_eq!(restored_b.contract(contract_id).unwrap().balance, 250);
+        assert_eq!(restored_a, state_a);
+        assert_eq!(restored_b, state_b);
+        assert_ne!(
+            restored_a.state_root().unwrap(),
+            restored_b.state_root().unwrap()
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn inactive_v3_restart_and_reorg_restore_winning_branch_state() {
         use crate::address::AddressNetwork;
         use crate::native_block_body_v2::NativeBlockBodyV2;
