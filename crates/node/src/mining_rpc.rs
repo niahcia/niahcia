@@ -1045,7 +1045,8 @@ fn parse_hash32_hex(value: &str) -> Result<Hash32, String> {
 mod tests {
     use super::{
         build_inactive_versioned_empty_work_payload, install_next_native_work_from_mempool,
-        submit_work, submit_work_with_mempool, NativeWorkPayload, WorkManager,
+        install_next_native_work_with_activation, submit_work, submit_work_with_mempool,
+        NativeWorkPayload, WorkManager,
     };
     use crate::address::AddressNetwork;
     use crate::native_execution::{
@@ -1676,4 +1677,82 @@ mod tests {
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
+    #[test]
+    fn activation_installer_moves_work_manager_from_v2_to_v3() {
+        let path = temp_state_path("activation-installer-v2-v3");
+        let store = StateStore::open(&path).unwrap();
+        let (genesis, _) = canonical_parent_with_state(&store, NativeStateV1::default());
+        let activation = crate::native_activation_v2::NativeExecutionActivationV3 {
+            v2_activation_height: 1,
+            v3_activation_height: 2,
+        };
+        let registry =
+            crate::native_contract_runtime_registry_v1::NativeContractRuntimeRegistryV1::default();
+        let work = test_work_manager(&genesis);
+
+        install_next_native_work_with_activation(
+            &work,
+            &store,
+            [0_u8; 20],
+            activation,
+            &registry,
+        )
+        .unwrap();
+        work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V2)
+            .unwrap();
+        let (generation, v2_header, _, _) = work.current();
+        let (_, _, v2_payload) = work
+            .submission_candidate(generation, v2_header.mining_template_id(), 0, 0)
+            .unwrap();
+        let NativeWorkPayload::V2 {
+            execution: v2_execution,
+            native_state: v2_state,
+            body: v2_body,
+        } = v2_payload
+        else {
+            panic!("activation installer did not install V2 payload");
+        };
+        assert_eq!(v2_header.transactions_root, v2_execution.transactions_root);
+        assert_eq!(v2_header.execution_root, v2_execution.execution_root);
+        let v2_id = v2_header.block_id();
+        store
+            .insert_inactive_native_v2_block_with_body_and_execution_outcome(
+                v2_header,
+                &v2_body,
+                &v2_execution,
+                &v2_state,
+            )
+            .unwrap();
+
+        install_next_native_work_with_activation(
+            &work,
+            &store,
+            [0_u8; 20],
+            activation,
+            &registry,
+        )
+        .unwrap();
+        work.validate_execution_version(crate::native_activation_v2::NativeExecutionVersion::V3)
+            .unwrap();
+        let (generation, v3_header, _, _) = work.current();
+        assert_eq!(v3_header.parent_hash, v2_id);
+        let (_, _, v3_payload) = work
+            .submission_candidate(generation, v3_header.mining_template_id(), 0, 0)
+            .unwrap();
+        let NativeWorkPayload::V3 {
+            execution: v3_execution,
+            native_state: v3_state,
+            ..
+        } = v3_payload
+        else {
+            panic!("activation installer did not install V3 payload");
+        };
+        assert_eq!(v3_header.transactions_root, v3_execution.transactions_root);
+        assert_eq!(v3_header.execution_root, v3_execution.execution_root);
+        assert_eq!(v3_state.base(), &v2_state);
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
 }
