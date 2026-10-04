@@ -126,11 +126,12 @@ fn main() -> ExitCode {
 
     let native_execution_activation = config.native_execution_activation();
     if let Some(activation) = native_execution_activation {
-        info!(
+        error!(
             v2_activation_height = activation.v2_activation_height,
             v3_activation_height = activation.v3_activation_height,
-            "native execution activation schedule configured"
+            "refusing to start with native V2/V3 activation configured until mempool and P2P admission are activation-aware"
         );
+        return ExitCode::FAILURE;
     }
 
     let state_path = config.data_dir.join("state.redb");
