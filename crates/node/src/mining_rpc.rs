@@ -83,6 +83,7 @@ impl WorkManager {
         }
     }
 
+    #[cfg(test)]
     pub fn execution_version(&self) -> NativeExecutionVersion {
         self.inner
             .read()
@@ -204,6 +205,7 @@ impl WorkManager {
         Ok(state.generation)
     }
 
+    #[cfg(test)]
     pub fn validate_execution_version(
         &self,
         expected: NativeExecutionVersion,
