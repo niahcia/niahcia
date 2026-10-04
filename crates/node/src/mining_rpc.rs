@@ -172,13 +172,7 @@ impl WorkManager {
             } => (execution.clone(), native_state.clone(), body.clone()),
             _ => return Err("versioned mining payload submission is not active yet".into()),
         };
-        Ok((
-            header,
-            state.randomx_seed,
-            execution,
-            native_state,
-            body,
-        ))
+        Ok((header, state.randomx_seed, execution, native_state, body))
     }
 
     fn mark_solved(&self, generation: u64, template_id: Hash32) -> Result<(), String> {
