@@ -615,9 +615,9 @@ fn build_inactive_versioned_empty_work_payload(
         NativeExecutionVersion::V1 => Err("versioned work helper requires V2 or V3 height".into()),
         NativeExecutionVersion::V2 => {
             let mut native_state = if height == activation.v2_activation_height {
-                let parent_state = state
-                    .native_state_snapshot(parent_id)?
-                    .ok_or_else(|| "V2 activation parent is missing V1 state snapshot".to_string())?;
+                let parent_state = state.native_state_snapshot(parent_id)?.ok_or_else(|| {
+                    "V2 activation parent is missing V1 state snapshot".to_string()
+                })?;
                 crate::native_activation_v2::NativeExecutionActivationV2 {
                     activation_height: activation.v2_activation_height,
                 }
@@ -646,7 +646,9 @@ fn build_inactive_versioned_empty_work_payload(
             let mut native_state = if activation.is_v3_activation_height(height)? {
                 let parent_state = state
                     .inactive_native_state_v2_snapshot(parent_id)?
-                    .ok_or_else(|| "V3 activation parent is missing V2 state snapshot".to_string())?;
+                    .ok_or_else(|| {
+                        "V3 activation parent is missing V2 state snapshot".to_string()
+                    })?;
                 activation.migrate_v2_parent_state(parent_height, parent_state)?
             } else {
                 state
