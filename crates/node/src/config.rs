@@ -252,7 +252,9 @@ reth_engine_api = "http://127.0.0.1:8551"
         assert!(cfg.validate().unwrap_err().contains("configured together"));
 
         cfg.native_v3_activation_height = Some(10);
-        assert!(cfg.validate().unwrap_err().contains("V2 height < V3 height"));
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .contains("V2 height < V3 height"));
     }
-
 }
