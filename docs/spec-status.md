@@ -1,6 +1,6 @@
 # NIAHCIA Specification Status Audit
 
-Last reviewed: 2026-10-02
+Last reviewed: 2026-10-03
 
 This file is a living audit of protocol status. Implementation alone does not make behavior normative.
 
@@ -36,7 +36,7 @@ This file is a living audit of protocol status. Implementation alone does not ma
 | NativeState V1 | IMPLEMENTED + VECTORED | Active accounts-only state/snapshot path. |
 | NativeBlockBody V1 | IMPLEMENTED | Active canonical non-empty block-body path. |
 | NativeBlockBody V2 | IMPLEMENTED (DEV) + INACTIVE | Versioned canonical body for ordered V1/V2 signed transactions; not admitted to active runtime. |
-| Native Execution Commitment V3 | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV3/ExecutionResultV3 extends commitments across transfers, compute, ContractCreate, and ContractCall with post-state roots and aggregate gas/fee accounting. Locked V3 interoperability vectors and persistence integration remain. |
+| Native Execution Commitment V3 | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV3/ExecutionResultV3 extends commitments across transfers, compute, ContractCreate, and ContractCall with post-state roots and aggregate gas/fee accounting. V3 receipt/result canonical bytes and commitments are locked; inactive V3 body/execution/state persistence is implemented. |
 | Native Execution Commitment V2 | IMPLEMENTED (DEV) + VECTOR LOCKED + REVIEW REQUIRED + INACTIVE | Domain-separated ReceiptV2/ExecutionResultV2 commits transaction schema/action, per-transaction post-state roots, aggregate state/gas/fees. `test-vectors/native-execution-v2.json` locks canonical receipt/result bytes and commitments; activation remains open. |
 | Native Compute Gas V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Open=3,000, Settle=5,000, Refund=2,000 intrinsic gas; transfer-shaped base-fee burn / producer-priority accounting; inactive V2 only. |
 | NVM1 Code Format V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Runtime ID 1 candidate with deterministic VM execution, bounded stack/memory/storage operations, gas schedule, STOP/RETURN/REVERT/trap semantics; not active consensus. |
@@ -44,7 +44,7 @@ This file is a living audit of protocol status. Implementation alone does not ma
 | ContractCreate Payload V1 | IMPLEMENTED (DEV) + VECTOR LOCKED + CANDIDATE + INACTIVE | NCE/1 runtime_id/code/init_data boundary; runtime_id zero reserved; code/init each capped at 65,536 bytes; executed by the inactive NVM1 ContractCreate path. |
 | Native Contract State V1 | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + INACTIVE | Contract balance, opaque runtime/code bytes, fixed 32-byte key/value storage, contracts root, and NativeStateV3 successor snapshot/root are defined and vectored without selecting a VM. |
 | Native Execution V2 activation boundary | IMPLEMENTED (DEV) + VECTORED + CANDIDATE + REVIEW REQUIRED + INACTIVE | Explicit V1-before / V2-at-and-after height rule plus deterministic V1 -> V2 parent-state migration helper. Locked fixture covers H-1/H/H+1, rejection, restart, and reorg classification. No real activation height is assigned or wired into active runtime. |
-| Native smart-contract runtime | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | NVM1 ContractCreate/ContractCall, NativeStateV3, runtime activation, gas/fee accounting, revert/trap semantics, atomic V3 block execution, compute+contract coexistence, and V3 receipt/execution commitments are implemented. Persistence/restart/reorg hardening, locked V3 vectors, activation, and devnet validation remain. |
+| Native smart-contract runtime | IMPLEMENTED (DEV) + REVIEW REQUIRED + INACTIVE | NVM1 ContractCreate/ContractCall, NativeStateV3, runtime activation, gas/fee accounting, revert/trap semantics, atomic V3 block execution, compute+contract coexistence, and V3 receipt/execution commitments are implemented. Atomic V3 persistence, restart recovery, and competing-branch/reorg persistence are implemented and tested. Consensus activation and cross-node devnet validation remain. |
 | NativeState V2 | IMPLEMENTED (DEV) + VECTORED + INACTIVE | Accounts + ComputeChannel state; no activation height set. |
 | NativeTransaction V2 | IMPLEMENTED (DEV) + VECTORED + INACTIVE | Explicit ComputeChannel actions; not admitted to active mempool/P2P/mining. |
 | Compute action payloads | IMPLEMENTED (DEV) + VECTORED | Canonical Open/Settle/Refund payloads. |
@@ -129,14 +129,14 @@ The active reference node is native-execution only.
 
 ## Highest-priority open protocol work
 
-1. Preserve the now-locked NativeReceiptV2 / NativeBlockExecutionResultV2 vectors; incompatible changes require an explicit successor version.
-2. Preserve the locked activation/migration fixture in `test-vectors/native-execution-v2-activation.json`; only after remaining fee/gas and runtime review should a concrete network activation parameter be selected.
-3. Wrap the new inactive ContractCreate constructor transition in explicit nonce/value/fee failure semantics, then implement inactive ContractCall and contract receipts/persistence.
-4. Review the now-vectored candidate compute gas/fee schedule together with V2 activation economics before selecting a concrete activation height.
+1. Add restart/reorg coverage using actual divergent contract state, not only empty V3 blocks.
+2. Complete cross-node devnet validation for V3 contract execution, commitments, persistence, and reorg behavior.
+3. Define and test the explicit consensus activation boundary for the V3 native smart-contract path without changing locked V1/V2 behavior.
+4. Review the candidate compute gas/fee schedule together with V2 activation economics before selecting a concrete activation height.
 5. Resolve stock miner/pool RandomX interoperability.
 6. Resolve difficulty/timestamp hardening.
 7. Finalize public-testnet genesis/network/monetary parameters.
-8. Keep `niahcia` and the retained `niahcia-protocol` mirror synchronized for protocol-visible changes.
+8. Keep implementation, affected specifications/status, interoperability vectors, and `docs/CURRENT-WORK.md` synchronized inside this canonical repository.
 
 ## Documentation rule
 
