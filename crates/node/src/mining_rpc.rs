@@ -36,7 +36,6 @@ pub struct WorkManager {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 enum NativeWorkPayload {
     V1 {
         execution: NativeBlockExecutionResultV1,
@@ -143,16 +142,7 @@ impl WorkManager {
         template_id: Hash32,
         nonce: u64,
         extra_nonce: u64,
-    ) -> Result<
-        (
-            BlockHeaderV1,
-            Hash32,
-            NativeBlockExecutionResultV1,
-            NativeStateV1,
-            NativeBlockBodyV1,
-        ),
-        String,
-    > {
+    ) -> Result<(BlockHeaderV1, Hash32, NativeWorkPayload), String> {
         let state = self
             .inner
             .read()
@@ -167,15 +157,7 @@ impl WorkManager {
         let mut header = state.header.clone();
         header.nonce = nonce;
         header.extra_nonce = extra_nonce;
-        let (execution, native_state, body) = match &state.payload {
-            NativeWorkPayload::V1 {
-                execution,
-                native_state,
-                body,
-            } => (execution.clone(), native_state.clone(), body.clone()),
-            _ => return Err("versioned mining payload submission is not active yet".into()),
-        };
-        Ok((header, state.randomx_seed, execution, native_state, body))
+        Ok((header, state.randomx_seed, state.payload.clone()))
     }
 
     fn mark_solved(&self, generation: u64, template_id: Hash32) -> Result<(), String> {
@@ -534,19 +516,45 @@ fn submit_work_internal(
         .and_then(Value::as_u64)
         .ok_or_else(|| "pow_submitWork extra_nonce must be a u64".to_string())?;
 
-    let (header, seed, execution, native_state, body) =
+    let (header, seed, payload) =
         work.submission_candidate(generation, template_id, nonce, extra_nonce)?;
     let pow_hash = validate_block_candidate(&header, seed, state)?;
-    let outcome = state.insert_native_block_with_body_and_execution_outcome(
-        header,
-        &body,
-        &execution,
-        &native_state,
-    )?;
+    let outcome = match &payload {
+        NativeWorkPayload::V1 {
+            execution,
+            native_state,
+            body,
+        } => state.insert_native_block_with_body_and_execution_outcome(
+            header,
+            body,
+            execution,
+            native_state,
+        )?,
+        NativeWorkPayload::V2 {
+            execution,
+            native_state,
+            body,
+        } => state.insert_inactive_native_v2_block_with_body_and_execution_outcome(
+            header,
+            body,
+            execution,
+            native_state,
+        )?,
+        NativeWorkPayload::V3 {
+            execution,
+            native_state,
+            body,
+        } => state.insert_inactive_native_v3_block_with_body_and_execution_outcome(
+            header,
+            body,
+            execution,
+            native_state,
+        )?,
+    };
 
     if outcome.current_best == outcome.block.block_id() {
-        if let Some(mempool) = mempool {
-            remove_body_transactions_from_mempool(mempool, &body)?;
+        if let (Some(mempool), NativeWorkPayload::V1 { body, .. }) = (mempool, &payload) {
+            remove_body_transactions_from_mempool(mempool, body)?;
         }
 
         match (mempool, fee_recipient) {
