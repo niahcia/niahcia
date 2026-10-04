@@ -1,10 +1,12 @@
 use crate::native_execution::NativeStateV1;
 use crate::native_state_v2::NativeStateV2;
+use crate::native_state_v3::NativeStateV3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeExecutionVersion {
     V1,
     V2,
+    V3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +73,64 @@ impl NativeExecutionActivationV2 {
         }
 
         Ok(NativeStateV2::from_v1(parent_state))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeExecutionActivationV3 {
+    pub v2_activation_height: u64,
+    pub v3_activation_height: u64,
+}
+
+impl NativeExecutionActivationV3 {
+    pub fn validate(self) -> Result<Self, String> {
+        if self.v2_activation_height == 0 {
+            return Err("Native Execution V2 activation height must be greater than zero".into());
+        }
+        if self.v3_activation_height <= self.v2_activation_height {
+            return Err(
+                "Native Execution V3 activation height must be greater than V2 activation height"
+                    .into(),
+            );
+        }
+        Ok(self)
+    }
+
+    pub fn execution_version_at_height(
+        self,
+        height: u64,
+    ) -> Result<NativeExecutionVersion, String> {
+        self.validate()?;
+        if height < self.v2_activation_height {
+            Ok(NativeExecutionVersion::V1)
+        } else if height < self.v3_activation_height {
+            Ok(NativeExecutionVersion::V2)
+        } else {
+            Ok(NativeExecutionVersion::V3)
+        }
+    }
+
+    pub fn is_v3_activation_height(self, height: u64) -> Result<bool, String> {
+        self.validate()?;
+        Ok(height == self.v3_activation_height)
+    }
+
+    pub fn migrate_v2_parent_state(
+        self,
+        parent_height: u64,
+        parent_state: NativeStateV2,
+    ) -> Result<NativeStateV3, String> {
+        self.validate()?;
+        let expected_parent = self
+            .v3_activation_height
+            .checked_sub(1)
+            .ok_or_else(|| "Native Execution V3 activation parent height underflow".to_string())?;
+        if parent_height != expected_parent {
+            return Err(format!(
+                "Native Execution V3 migration requires parent height {expected_parent}, found {parent_height}"
+            ));
+        }
+        Ok(NativeStateV3::from_v2(parent_state))
     }
 }
 
@@ -246,4 +306,71 @@ mod tests {
             .unwrap_err()
             .contains("requires parent height 99"));
     }
+    #[test]
+    fn v3_activation_boundary_selects_v1_v2_and_v3_by_height() {
+        let activation = NativeExecutionActivationV3 {
+            v2_activation_height: 100,
+            v3_activation_height: 200,
+        };
+        assert_eq!(
+            activation.execution_version_at_height(99).unwrap(),
+            NativeExecutionVersion::V1
+        );
+        assert_eq!(
+            activation.execution_version_at_height(100).unwrap(),
+            NativeExecutionVersion::V2
+        );
+        assert_eq!(
+            activation.execution_version_at_height(199).unwrap(),
+            NativeExecutionVersion::V2
+        );
+        assert_eq!(
+            activation.execution_version_at_height(200).unwrap(),
+            NativeExecutionVersion::V3
+        );
+        assert_eq!(
+            activation.execution_version_at_height(201).unwrap(),
+            NativeExecutionVersion::V3
+        );
+        assert!(activation.is_v3_activation_height(200).unwrap());
+    }
+
+    #[test]
+    fn v3_activation_requires_ordered_nonzero_boundaries() {
+        assert!(NativeExecutionActivationV3 {
+            v2_activation_height: 0,
+            v3_activation_height: 200,
+        }
+        .validate()
+        .is_err());
+        assert!(NativeExecutionActivationV3 {
+            v2_activation_height: 100,
+            v3_activation_height: 100,
+        }
+        .validate()
+        .is_err());
+        assert!(NativeExecutionActivationV3 {
+            v2_activation_height: 100,
+            v3_activation_height: 99,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn v3_activation_migrates_exact_v2_parent_without_changing_base_state() {
+        let activation = NativeExecutionActivationV3 {
+            v2_activation_height: 100,
+            v3_activation_height: 200,
+        };
+        let parent = NativeStateV2::default();
+        let migrated = activation.migrate_v2_parent_state(199, parent.clone()).unwrap();
+        assert_eq!(migrated.base(), &parent);
+        assert_eq!(migrated.contract_count(), 0);
+        assert!(activation
+            .migrate_v2_parent_state(198, parent)
+            .unwrap_err()
+            .contains("requires parent height 199"));
+    }
+
 }
