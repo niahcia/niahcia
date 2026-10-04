@@ -349,7 +349,10 @@ fn ingest_blocks_v3(
         let body = match &transfer.body {
             NativeBlockBodyTransferV3::V1(body) => body,
             NativeBlockBodyTransferV3::V2(_) => {
-                return Err("P2P V3 versioned native block body received before execution activation".into())
+                return Err(
+                    "P2P V3 versioned native block body received before execution activation"
+                        .into(),
+                )
             }
         };
 
