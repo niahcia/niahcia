@@ -15,6 +15,8 @@ pub struct NodeConfig {
     pub p2p_bind: SocketAddr,
     pub p2p_peers: Vec<SocketAddr>,
     pub log_level: String,
+    pub native_v2_activation_height: Option<u64>,
+    pub native_v3_activation_height: Option<u64>,
 }
 
 impl Default for NodeConfig {
@@ -27,6 +29,8 @@ impl Default for NodeConfig {
             p2p_bind: "127.0.0.1:9442".parse().expect("valid default P2P socket"),
             p2p_peers: Vec::new(),
             log_level: "info".to_string(),
+            native_v2_activation_height: None,
+            native_v3_activation_height: None,
         }
     }
 }
@@ -144,6 +148,24 @@ impl NodeConfig {
             return Err("log_level must not be empty".into());
         }
 
+        match (
+            self.native_v2_activation_height,
+            self.native_v3_activation_height,
+        ) {
+            (None, None) => {}
+            (Some(v2), Some(v3)) if v2 > 0 && v3 > v2 => {}
+            (Some(_), Some(_)) => {
+                return Err(
+                    "native execution activation requires 0 < V2 height < V3 height".into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "native V2 and V3 activation heights must be configured together".into(),
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -209,4 +231,28 @@ reth_engine_api = "http://127.0.0.1:8551"
             .unwrap_err()
             .contains("must be a NIAHCIA account address"));
     }
+    #[test]
+    fn native_execution_activation_is_disabled_by_default() {
+        let cfg = NodeConfig::default();
+        assert_eq!(cfg.native_v2_activation_height, None);
+        assert_eq!(cfg.native_v3_activation_height, None);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn native_execution_activation_requires_ordered_pair() {
+        let mut cfg = NodeConfig {
+            native_v2_activation_height: Some(10),
+            native_v3_activation_height: Some(20),
+            ..NodeConfig::default()
+        };
+        cfg.validate().unwrap();
+
+        cfg.native_v3_activation_height = None;
+        assert!(cfg.validate().unwrap_err().contains("configured together"));
+
+        cfg.native_v3_activation_height = Some(10);
+        assert!(cfg.validate().unwrap_err().contains("V2 height < V3 height"));
+    }
+
 }
